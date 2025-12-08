@@ -1,0 +1,23 @@
+run:
+  random_seed: 12345
+  log_dir: demo_locations
+  time_log: true
+  num_experiments: 1
+audit:
+  privacy_game: privacy_loss_model
+  algorithm: RMIA
+  num_ref_models: 1
+  device: cpu
+  report_log: report_rmia
+  batch_size: 5000
+train:
+  model_name: mlp
+  device: cpu
+  batch_size: 256
+  optimizer: SGD
+  learning_rate: 0.1
+  weight_decay: 0
+  epochs: 100
+data:
+  dataset: locations
+  data_dir: data_locations

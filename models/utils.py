@@ -29,7 +29,8 @@ from peft import get_peft_model
 
 
 INPUT_OUTPUT_SHAPE = {
-    "cifar10": [3, 10],
+    
+    "locations": [446, 31],"cifar10": [3, 10],
     "cifar100": [3, 100],
     "purchase100": [600, 100],
     "texas100": [6169, 100],
