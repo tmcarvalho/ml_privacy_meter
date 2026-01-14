@@ -10,6 +10,12 @@ from transformers import PreTrainedModel, AutoTokenizer
 from dataset.utils import load_dataset_subsets
 
 
+def move_model_to_device(model, device):
+    if hasattr(model, "to"):
+        return model.to(device)
+    return model
+
+
 def get_softmax(
     model: Union[PreTrainedModel, torch.nn.Module],
     samples: torch.Tensor,
@@ -34,7 +40,8 @@ def get_softmax(
     Returns:
         all_softmax_list (np.array): softmax value of all samples
     """
-    model.to(device)
+
+    model = move_model_to_device(model, device)
     model.eval()
     with torch.no_grad():
         softmax_list = []
@@ -82,6 +89,44 @@ def get_softmax(
     return all_softmax_list
 
 
+def get_probs_nontorch_models(
+    model,
+    samples: torch.Tensor,
+    labels: torch.Tensor,
+    batch_size: int,
+) -> np.ndarray:
+    """
+    Compute RMIA membership signals for non-PyTorch models
+    using log-likelihood (negative loss).
+    
+    Returns:
+        np.ndarray of shape (num_samples, 1)
+    """
+
+    # Convert torch tensors to numpy if needed
+    if hasattr(samples, "cpu"):
+        samples = samples.cpu().numpy()
+    if hasattr(labels, "cpu"):
+        labels = labels.cpu().numpy()
+
+    n_samples = samples.shape[0]
+    all_probs = []
+
+    for start_idx in range(0, n_samples, batch_size):
+        end_idx = min(start_idx + batch_size, n_samples)
+        X_batch = samples[start_idx:end_idx]
+        y_batch = labels[start_idx:end_idx]
+
+        # Get probabilities
+        probs = model.predict_proba(X_batch)  
+
+        # Select true-class probabilities
+        true_class_probs = probs[np.arange(len(y_batch)), y_batch].reshape(-1, 1)
+        all_probs.append(true_class_probs)
+
+    return np.concatenate(all_probs, axis=0)  # shape: (num_samples, num_classes)
+
+
 def get_loss(
     model: Union[PreTrainedModel, torch.nn.Module],
     samples: torch.Tensor,
@@ -104,7 +149,7 @@ def get_loss(
     Returns:
         all_loss_list (np.array): Loss value of all samples
     """
-    model.to(device)
+    model = move_model_to_device(model, device)
     model.eval()
     with torch.no_grad():
         loss_list = []
@@ -146,6 +191,7 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
     Returns:
         signals (np.array): Signal value for all samples in all models
     """
+    new_models = ["lightgbm", "tabpfn"] #TODO: add more
     # Check if signals are available on disk
     signal_file_name = (
         f"{configs['audit']['algorithm'].lower()}_ramia_signals"
@@ -201,11 +247,18 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
             data = data.view(-1, *data.shape[2:])
             targets = targets.view(data.shape[0], -1)
     for model in models_list:
-        signals.append(
-            get_softmax(
-                model, data, targets, batch_size, device, pad_token_id=pad_token_id
+        if model_name.lower() in new_models:
+            # Use the LightGBM and foundation models
+            signals.append(
+                get_probs_nontorch_models(model, data, targets, batch_size)
             )
-        )
+            print(signals)
+        else:
+            # Use the original PyTorch/HuggingFace function
+            signals.append(
+                get_softmax(model, data, targets, batch_size, device, pad_token_id=pad_token_id)
+            )
+            (print(signals))
 
     signals = np.concatenate(signals, axis=1)
     os.makedirs(f"{configs['run']['log_dir']}/signals", exist_ok=True)

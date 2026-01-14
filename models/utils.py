@@ -15,7 +15,9 @@ from transformers import AutoModelForCausalLM
 
 from dataset.utils import get_dataloader
 from models import AlexNet, CNN, MLP, WideResNet
-from trainers.default_trainer import train, inference, dp_train
+from lightgbm import LGBMClassifier
+from tabpfn import TabPFNClassifier 
+from trainers.default_trainer import inference_nontorch_models, train, inference, dp_train, train_nontorch_models
 from trainers.fast_train import (
     load_cifar10_data,
     NetworkEMA,
@@ -29,8 +31,13 @@ from peft import get_peft_model
 
 
 INPUT_OUTPUT_SHAPE = {
-    
-    "locations": [446, 31],"cifar10": [3, 10],
+    "texas10": [2732, 9],
+    "purchases10": [599, 10],
+    "student_performance": [30, 3],
+    "dropout_success": [36, 3],
+    "credit_data": [20, 4],
+    "cirrhosis": [17, 3],
+    "locations": [446, 11],    
     "cifar100": [3, 100],
     "purchase100": [600, 100],
     "texas100": [6169, 100],
@@ -61,6 +68,11 @@ def get_model(model_type: str, dataset_name: str, configs: dict):
     in_shape = INPUT_OUTPUT_SHAPE[dataset_name][0]
     if model_type == "CNN":
         return CNN(num_classes=num_classes)
+    if model_type == "lightgbm":
+        return LGBMClassifier()
+    if model_type == "tabpfn":
+        return TabPFNClassifier()
+    # TODO: Add other model architectures as needed
     elif model_type == "alexnet":
         return AlexNet(num_classes=num_classes)
     elif model_type == "wrn28-1":
@@ -103,17 +115,24 @@ def load_existing_model(
     if model_checkpoint_extension == ".pkl":
         with open(model_metadata["model_path"], "rb") as file:
             model_weight = pickle.load(file)
-        model.load_state_dict(model_weight)
+        # For PyTorch, call load_state_dict
+        if hasattr(model, "load_state_dict") and isinstance(model_weight, dict):
+            model.load_state_dict(model_weight)
+            return model
+        else:
+            # Non pytorch modes: LightGBM / TabPFN / sklearn model
+            return model_weight
     elif model_checkpoint_extension == ".pt" or model_checkpoint_extension == ".pth":
-        model.load_state_dict(torch.load(model_metadata["model_path"]))
+        return model.load_state_dict(torch.load(model_metadata["model_path"]))
     elif model_checkpoint_extension == "":
         if isinstance(model, PreTrainedModel):
             model = model.from_pretrained(model_metadata["model_path"])
         else:
             raise ValueError(f"Model path is invalid.")
+        return model
     else:
         raise ValueError(f"Model path is invalid.")
-    return model
+
 
 
 def dp_load_existing_model(
@@ -362,6 +381,7 @@ def prepare_models(
 
     model_metadata_dict = {}
     model_list = []
+    new_models = ["lightgbm", "tabpfn"] #TODO: add other models here!
 
     # for split, split_info in enumerate(data_split_info):
     for split in range(len(data_split_info)):
@@ -375,8 +395,8 @@ def prepare_models(
         model_name, dataset_name, batch_size, device = (
             configs["train"]["model_name"],
             configs["data"]["dataset"],
-            configs["train"]["batch_size"],
-            configs["train"]["device"],
+            configs["train"].get("batch_size", None),
+            configs["train"].get("device", "cpu")
         )
 
         if model_name == "gpt2":
@@ -410,16 +430,30 @@ def prepare_models(
                 torch.utils.data.Subset(dataset, split_info["test"]),
                 batch_size=batch_size,
             )
-            model = train(
-                get_model(model_name, dataset_name, configs),
-                train_loader,
-                configs["train"],
-                test_loader,
-            )
-            test_loss, test_acc = inference(model, test_loader, device)
-            train_loss, train_acc = inference(model, train_loader, device)
-            logger.info(f"Train accuracy {train_acc}, Train Loss {train_loss}")
-            logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}")
+            if model_name in new_models:
+                model = train_nontorch_models(
+                    get_model(model_name, dataset_name, configs),
+                    train_loader,
+                    configs["train"],
+                    test_loader,
+                )
+                test_loss, test_acc = inference_nontorch_models(model, test_loader)
+                train_loss, train_acc = inference_nontorch_models(model, train_loader)
+                logger.info(f"Train accuracy {train_acc}, Train Loss {train_loss}")
+                logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}")
+
+            else:
+                model = train(
+                    get_model(model_name, dataset_name, configs),
+                    train_loader,
+                    configs["train"],
+                    test_loader,
+                )
+                test_loss, test_acc = inference(model, test_loader, device)
+                train_loss, train_acc = inference(model, train_loader, device)
+                logger.info(f"Train accuracy {train_acc}, Train Loss {train_loss}")
+                logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}")
+
         elif model_name == "speedyresnet" and dataset_name == "cifar10":
             data = load_cifar10_data(
                 dataset,
@@ -457,24 +491,40 @@ def prepare_models(
 
         model_idx = split
 
-        with open(f"{log_dir}/model_{model_idx}.pkl", "wb") as f:
-            pickle.dump(model.state_dict(), f)
+        if model_name in new_models:
+            with open(f"{log_dir}/model_{model_idx}.pkl", "wb") as f:
+                pickle.dump(model, f)
+            train_config_metadata = dict(configs.get("train", {}))
+            model_metadata_dict[model_idx] = {
+                "num_train": len(split_info["train"]),
+                "model_name": model_name,
+                "model_path": f"{log_dir}/model_{model_idx}.pkl",
+                "train_acc": train_acc,
+                "test_acc": test_acc,
+                "train_loss": train_loss,
+                "test_loss": test_loss,
+                "dataset": dataset_name,
+                **train_config_metadata,
+            }
+        else:
+            with open(f"{log_dir}/model_{model_idx}.pkl", "wb") as f:
+                pickle.dump(model.state_dict(), f)
 
-        model_metadata_dict[model_idx] = {
-            "num_train": len(split_info["train"]),
-            "optimizer": configs["train"]["optimizer"],
-            "batch_size": batch_size,
-            "epochs": configs["train"]["epochs"],
-            "model_name": model_name,
-            "learning_rate": configs["train"]["learning_rate"],
-            "weight_decay": configs["train"]["weight_decay"],
-            "model_path": f"{log_dir}/model_{model_idx}.pkl",
-            "train_acc": train_acc,
-            "test_acc": test_acc,
-            "train_loss": train_loss,
-            "test_loss": test_loss,
-            "dataset": dataset_name,
-        }
+            model_metadata_dict[model_idx] = {
+                "num_train": len(split_info["train"]),
+                "optimizer": configs["train"]["optimizer"],
+                "batch_size": batch_size,
+                "epochs": configs["train"]["epochs"],
+                "model_name": model_name,
+                "learning_rate": configs["train"]["learning_rate"],
+                "weight_decay": configs["train"]["weight_decay"],
+                "model_path": f"{log_dir}/model_{model_idx}.pkl",
+                "train_acc": train_acc,
+                "test_acc": test_acc,
+                "train_loss": train_loss,
+                "test_loss": test_loss,
+                "dataset": dataset_name,
+            }
 
     with open(f"{log_dir}/models_metadata.json", "w") as f:
         json.dump(model_metadata_dict, f, indent=4)
