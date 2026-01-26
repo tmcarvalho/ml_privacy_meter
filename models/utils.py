@@ -16,7 +16,11 @@ from transformers import AutoModelForCausalLM
 from dataset.utils import get_dataloader
 from models import AlexNet, CNN, MLP, WideResNet
 from lightgbm import LGBMClassifier
-from tabpfn import TabPFNClassifier 
+from sklearn.ensemble import RandomForestClassifier
+from tabpfn import TabPFNClassifier
+from tabicl import TabICLClassifier
+from tabdpt import TabDPTClassifier
+from tarte_ai import TARTEBoostRegressor_TabPFN
 from trainers.default_trainer import inference_nontorch_models, train, inference, dp_train, train_nontorch_models
 from trainers.fast_train import (
     load_cifar10_data,
@@ -70,8 +74,16 @@ def get_model(model_type: str, dataset_name: str, configs: dict):
         return CNN(num_classes=num_classes)
     if model_type == "lightgbm":
         return LGBMClassifier()
+    if model_type == "rf":
+        return RandomForestClassifier()
     if model_type == "tabpfn":
         return TabPFNClassifier()
+    if model_type == "tabicl":
+        return TabICLClassifier(device="cuda:0")
+    if model_type == "tabdpt":
+        return TabDPTClassifier(device="cuda:0")
+    if model_type == "tarte": ## is not working
+        return TARTEBoostRegressor_TabPFN()
     # TODO: Add other model architectures as needed
     elif model_type == "alexnet":
         return AlexNet(num_classes=num_classes)
@@ -381,7 +393,7 @@ def prepare_models(
 
     model_metadata_dict = {}
     model_list = []
-    new_models = ["lightgbm", "tabpfn"] #TODO: add other models here!
+    new_models = ["lightgbm", "rf", "tabpfn", "tabicl", "tabdpt", "tarte"] #TODO: add other models here!
 
     # for split, split_info in enumerate(data_split_info):
     for split in range(len(data_split_info)):
