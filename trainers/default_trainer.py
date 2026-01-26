@@ -222,39 +222,40 @@ def train_nontorch_models(
         Trained model (LightGBM or other compatible models)
     """
 
-    # Ensure the model is moved to the correct device (e.g., cuda:1 or cpu)
-    # TODO: delete this function if not used
-    def move_model_to_device(model):
-        device = configs.get("device", "cpu")
-        if hasattr(model, "to"):
-            return model.to(device)
-        return model
-
-    
-
     # Convert DataLoader to NumPy
     X_train, y_train = dataloader_to_numpy(train_loader)
 
-    if configs["model_name"] == "lightgbm":
+    if configs["model_name"] == "lightgbm" or configs["model_name"] == "rf":
         # model = move_model_to_device(model)
         model.set_params(
             n_estimators=configs.get("n_estimators", 100),
-            learning_rate=configs.get("learning_rate", 0.1),
+            #learning_rate=configs.get("learning_rate", 0.1),
             max_depth=configs.get("max_depth", 5),
-            min_child_weight=configs.get("min_child_weight", 31),
+            #min_child_weight=configs.get("min_child_weight", 31),
             random_state=configs.get("random_state", 42),
         )
         model.fit(X_train, y_train)
 
-    if configs["model_name"] == "tabpfn":
-        print(model)
+    if configs["model_name"] == "tabpfn" or configs["model_name"] == "tabicl" or configs["model_name"] == "tabdpt" or configs["model_name"] == "tarte":
+        import torch.nn.functional as F
+
+        _old_sdpa = F.scaled_dot_product_attention
+
+        def sdpa_ignore_gqa(*args, **kwargs):
+            # Remove enable_gqa if present
+            kwargs.pop("enable_gqa", None)
+            return _old_sdpa(*args, **kwargs)
+
+        F.scaled_dot_product_attention = sdpa_ignore_gqa
+
         model.fit(X_train, y_train)
+    
     #TODO: add other models here
     y_pred = model.predict(X_train)
     train_acc = accuracy_score(y_train, y_pred)
-
+    
     train_loss = None
-    if hasattr(model, "predict_proba"):
+    if hasattr(model, "predict_proba"): #loss requires probabilities
         train_loss = log_loss(y_train, model.predict_proba(X_train))
 
     print(f"Train Loss: {train_loss:.4f}" if train_loss else "")
