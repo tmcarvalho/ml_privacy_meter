@@ -224,19 +224,29 @@ def train_nontorch_models(
 
     # Convert DataLoader to NumPy
     X_train, y_train = dataloader_to_numpy(train_loader)
+    ensembling_models = ["rf"]
+    boosting_models = ["lightgbm", "xgboost"]
+    foundation_models = ["tabpfn", "tabicl", "tabdpt", "tarte"]
 
-    if configs["model_name"] == "lightgbm" or configs["model_name"] == "rf":
+    if configs["model_name"] in boosting_models:
         # model = move_model_to_device(model)
         model.set_params(
             n_estimators=configs.get("n_estimators", 100),
-            #learning_rate=configs.get("learning_rate", 0.1),
+            learning_rate=configs.get("learning_rate", 0.1),
             max_depth=configs.get("max_depth", 5),
-            #min_child_weight=configs.get("min_child_weight", 31),
+            min_child_weight=configs.get("min_child_weight", 31),
             random_state=configs.get("random_state", 42),
         )
-        model.fit(X_train, y_train)
+    
+    if configs["model_name"] in ensembling_models:
+        # model = move_model_to_device(model)
+        model.set_params(
+            n_estimators=configs.get("n_estimators", 100),
+            max_depth=configs.get("max_depth", 5),
+            random_state=configs.get("random_state", 42),
+        )
 
-    if configs["model_name"] == "tabpfn" or configs["model_name"] == "tabicl" or configs["model_name"] == "tabdpt" or configs["model_name"] == "tarte":
+    if configs["model_name"] in foundation_models:
         import torch.nn.functional as F
 
         _old_sdpa = F.scaled_dot_product_attention
@@ -248,7 +258,7 @@ def train_nontorch_models(
 
         F.scaled_dot_product_attention = sdpa_ignore_gqa
 
-        model.fit(X_train, y_train)
+    model.fit(X_train, y_train)
     
     #TODO: add other models here
     y_pred = model.predict(X_train)
