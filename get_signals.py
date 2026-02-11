@@ -2,6 +2,7 @@ import os.path
 from typing import Optional, Union
 
 import numpy as np
+from sklearn.metrics import log_loss
 import torch
 from torch.nn import functional as F
 from tqdm import tqdm
@@ -22,7 +23,7 @@ def get_softmax(
     labels: torch.Tensor,
     batch_size: int,
     device: str,
-    temp: float = 1.0,
+    temp: float = 1.0, # normal softmax
     pad_token_id: Optional[int] = None,
 ) -> np.ndarray:
     """
@@ -45,7 +46,7 @@ def get_softmax(
     model.eval()
     with torch.no_grad():
         softmax_list = []
-        batched_samples = torch.split(samples, batch_size)
+        batched_samples = torch.split(samples, batch_size) # Splits inputs and labels into mini-batches
         batched_labels = torch.split(labels, batch_size)
 
         for x, y in tqdm(
@@ -56,7 +57,7 @@ def get_softmax(
             x = x.to(device)
             y = y.to(device)
 
-            pred = model(x)
+            pred = model(x) # forward pass to get logits
             if isinstance(model, PreTrainedModel):
                 logits = pred.logits
                 logit_signals = torch.div(logits, temp)
@@ -74,57 +75,84 @@ def get_softmax(
                 )
                 softmax_list.append(sequence_probs.to("cpu").view(-1, 1))
             else:
-                logit_signals = torch.div(pred, temp)
-                max_logit_signals, _ = torch.max(logit_signals, dim=1)
+                logit_signals = torch.div(pred, temp) # apply temperature scaling
+                max_logit_signals, _ = torch.max(logit_signals, dim=1) # find max per sample
                 # This is to avoid overflow when exp(logit_signals)
                 logit_signals = torch.sub(
                     logit_signals, max_logit_signals.reshape(-1, 1)
                 )
-                exp_logit_signals = torch.exp(logit_signals)
+                exp_logit_signals = torch.exp(logit_signals) # manual softmax computation
                 exp_logit_sum = exp_logit_signals.sum(dim=1).reshape(-1, 1)
                 true_exp_logit = exp_logit_signals.gather(1, y.reshape(-1, 1))
-                softmax_list.append(torch.div(true_exp_logit, exp_logit_sum).to("cpu"))
+                softmax_list.append(torch.div(true_exp_logit, exp_logit_sum).to("cpu")) # final softmax prob -- returns probabilities for TRUE labels only
         all_softmax_list = np.concatenate(softmax_list)
     model.to("cpu")
     return all_softmax_list
 
 
+def stable_softmax(logits: np.ndarray) -> np.ndarray:
+    logits = logits - np.max(logits, axis=1, keepdims=True)
+    exp_logits = np.exp(logits)
+    return exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+
 def get_probs_nontorch_models(
     model,
-    samples: torch.Tensor,
-    labels: torch.Tensor,
-    batch_size: int,
+    logger,
+    samples,
+    labels,
+    batch_size,
+    temp: float = 1.0,
 ) -> np.ndarray:
     """
-    Compute RMIA membership signals for non-PyTorch models
-    using log-likelihood (negative loss).
-    
+    Compute the softmax probability assigned to the true class
+    for sklearn-style models.
+
     Returns:
-        np.ndarray of shape (num_samples, 1)
+        np.ndarray of shape (n_samples, 1)
     """
 
-    # Convert torch tensors to numpy if needed
-    if hasattr(samples, "cpu"):
-        samples = samples.cpu().numpy()
-    if hasattr(labels, "cpu"):
-        labels = labels.cpu().numpy()
+    softmax_list = []
+    model_exposing = None
+    for start in range(0, len(samples), batch_size):
+        end = start + batch_size
+        x_batch = samples[start:end]
+        y_batch = labels[start:end]
 
-    n_samples = samples.shape[0]
-    all_probs = []
+        # get logits
+        if hasattr(model, "predict_logits"):
+            logits = model.predict_logits(x_batch)
+            model_exposing = "predict_logits"
 
-    for start_idx in range(0, n_samples, batch_size):
-        end_idx = min(start_idx + batch_size, n_samples)
-        X_batch = samples[start_idx:end_idx]
-        y_batch = labels[start_idx:end_idx]
+        elif hasattr(model, "decision_function"):
+            logits = model.decision_function(x_batch)
 
-        # Get probabilities
-        probs = model.predict_proba(X_batch)  
+            # Binary sklearn case → convert to 2-class logits
+            if logits.ndim == 1:
+                logits = np.stack([-logits, logits], axis=1)
+            model_exposing = "decision_function"
 
-        # Select true-class probabilities
-        true_class_probs = probs[np.arange(len(y_batch)), y_batch].reshape(-1, 1)
-        all_probs.append(true_class_probs)
+        elif hasattr(model, "predict_proba"):
+            probs = model.predict_proba(x_batch)
+            logits = np.log(probs + 1e-12)  # pseudo-logits=\
+            model_exposing = "predict_proba"
 
-    return np.concatenate(all_probs, axis=0)  # shape: (num_samples, num_classes)
+        else:
+            raise ValueError("Model must expose logits or probabilities.")
+
+        # temperature scaling
+        logits = logits / temp
+
+        # softmax
+        probs = stable_softmax(logits)
+
+        # select true class probability
+        true_probs = probs[np.arange(len(y_batch)), y_batch]
+        softmax_list.append(true_probs.reshape(-1, 1))
+
+    logger.info("Model exposing via {}.".format(model_exposing))
+
+    return np.concatenate(softmax_list)
 
 
 def get_loss(
@@ -191,7 +219,7 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
     Returns:
         signals (np.array): Signal value for all samples in all models
     """
-    new_models = ["lightgbm", "tabpfn"] #TODO: add more
+    new_models = ["lightgbm", "rf", "tabpfn", "tabicl", "tabdpt", "tarte"] #TODO: add more
     # Check if signals are available on disk
     signal_file_name = (
         f"{configs['audit']['algorithm'].lower()}_ramia_signals"
@@ -199,12 +227,10 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
         else f"{configs['audit']['algorithm'].lower()}_signals"
     )
     signal_file_name += "_pop.npy" if is_population else ".npy"
-    if os.path.exists(
-        f"{configs['run']['log_dir']}/signals/{signal_file_name}",
-    ):
-        signals = np.load(
-            f"{configs['run']['log_dir']}/signals/{signal_file_name}",
-        )
+    signal_dir = os.path.join(configs['run']['log_dir'], 'signals')
+    signal_path = os.path.join(signal_dir, signal_file_name)
+    if os.path.exists(signal_path):
+        signals = np.load(signal_path)
         if configs.get("ramia", None) is None:
             expected_size = len(dataset)
             signal_source = "training data size"
@@ -250,21 +276,16 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
         if model_name.lower() in new_models:
             # Use the LightGBM and foundation models
             signals.append(
-                get_probs_nontorch_models(model, data, targets, batch_size)
+                get_probs_nontorch_models(model, logger, data, targets, batch_size)
             )
-            print(signals)
         else:
             # Use the original PyTorch/HuggingFace function
             signals.append(
                 get_softmax(model, data, targets, batch_size, device, pad_token_id=pad_token_id)
             )
-            (print(signals))
 
     signals = np.concatenate(signals, axis=1)
-    os.makedirs(f"{configs['run']['log_dir']}/signals", exist_ok=True)
-    np.save(
-        f"{configs['run']['log_dir']}/signals/{signal_file_name}",
-        signals,
-    )
+    os.makedirs(signal_dir, exist_ok=True)
+    np.save(signal_path, signals)
     logger.info("Signals saved to disk.")
     return signals
