@@ -150,3 +150,126 @@ def run_loss(target_signals: np.ndarray) -> np.ndarray:
     """
     mia_scores = -target_signals
     return mia_scores
+
+def run_lira(
+    target_signals: np.ndarray,
+    shadow_model_signals: np.ndarray,
+    shadow_model_memberships: np.ndarray,
+    target_memberships: np.ndarray,
+) -> np.ndarray:
+    """
+    Attack a target model using the LiRA (Likelihood-Ratio Attack) method.
+    
+    Aligned with PrivacyGuard's offline LiRA implementation.
+    
+    For each sample x, we:
+    1. Compute predictions from shadow models where sample was NOT in training (OUT)
+    2. Estimate per-sample μ_out (mean of OUT predictions)
+    3. Estimate global σ_out (mean of per-sample standard deviations)
+    4. Compute: score = log P(conf_obs | N(μ_out, σ²_out_global))
+    5. Negate for offline variant on hold-out test set
+    
+    The intuition: Members typically have predictions that fit better under the 
+    "non-member" (OUT) distribution than population data.
+
+    Args:
+        target_signals (np.ndarray): Softmax signals from target model.
+                                     Shape: (num_samples,)
+        shadow_model_signals (np.ndarray): Softmax signals from shadow models.
+                                           Shape: (num_samples, num_shadow_models)
+        shadow_model_memberships (np.ndarray): Membership matrix for shadow models.
+                                               Shape: (num_samples, num_shadow_models)
+                                               Each entry [i,j] = 1 if sample i was in shadow model j's training
+        target_memberships (np.ndarray): Membership array for target model (1=in, 0=out).
+                                         Shape: (num_samples,)
+       
+    Returns:
+        np.ndarray: LiRA scores for all samples.
+                   For offline LiRA: -log P(conf_obs | N(μ_out, σ²_out_global))
+                   Higher value = more likely to be a member
+                   Shape: (num_samples,)
+    """
+    from scipy.stats import norm
+    
+    target_signals = target_signals.ravel()
+    target_memberships = target_memberships.ravel()
+    n_samples = len(target_signals)
+    
+    # For each sample, compute μ of OUT predictions (per-sample)
+    # OUT predictions = predictions from shadow models where sample was NOT in training
+    score_mean_out = np.zeros(n_samples)
+    score_std_out = np.zeros(n_samples)
+    
+    # shadow_model_memberships[i, j] = 1 if sample i was in shadow model j's training
+    
+    for i in range(n_samples):
+        sample_shadow_preds = shadow_model_signals[i, :]  # Predictions from all shadows
+        sample_memberships = shadow_model_memberships[i, :]  # Which shadows included this sample
+        
+        # OUT predictions: from shadows where sample was NOT included
+        out_mask = ~sample_memberships.astype(bool)
+        out_preds = sample_shadow_preds[out_mask]
+        
+        if len(out_preds) > 0:
+            score_mean_out[i] = np.mean(out_preds)
+            score_std_out[i] = np.std(out_preds)
+        else:
+            # No OUT predictions available, use overall mean and small std
+            score_mean_out[i] = np.mean(sample_shadow_preds)
+            score_std_out[i] = 1e-8
+    
+    # Compute global standard deviation (mean of all per-sample stds)
+    global_std_out = np.mean(score_std_out)
+    global_std_out = np.maximum(global_std_out, 1e-8)
+    
+    # For offline LiRA: compute log-likelihood under OUT distribution
+    # log P(conf_obs | N(μ_out_sample, σ²_out_global))
+    lira_scores = norm.logpdf(target_signals, score_mean_out, global_std_out)
+    
+    # Negate scores for offline LiRA on hold-out test set
+    # (Aligns with PrivacyGuard: if not online_attack, negate the scores)
+    # Higher negated score = more likely to be a member
+    lira_scores = -lira_scores
+    
+    return lira_scores
+
+
+def get_shadow_model_signals(
+    all_signals: np.ndarray,
+    all_memberships: np.ndarray,
+    target_model_idx: int,
+    num_reference_models: int,
+) -> tuple:
+    """
+    Extract signals from shadow models (all models except target and paired model).
+    Also returns the corresponding membership matrix for shadow models.
+    
+    Args:
+        all_signals (np.ndarray): Signals from all models.
+                                  Shape: (num_samples, num_models)
+        all_memberships (np.ndarray): Membership matrix for all models.
+                                      Shape: (num_samples, num_models)
+        target_model_idx (int): Index of the target model.
+        num_reference_models (int): Number of shadow models to use.
+
+    Returns:
+        tuple: (shadow_signals, shadow_memberships)
+               - shadow_signals: Shape (num_samples, num_shadow_models)
+               - shadow_memberships: Shape (num_samples, num_shadow_models)
+    """
+    paired_model_idx = (
+        target_model_idx + 1 if target_model_idx % 2 == 0 else target_model_idx - 1
+    )
+    
+    # Get indices of shadow models (excluding target and its paired model)
+    shadow_indices = [
+        i
+        for i in range(all_signals.shape[1])
+        if i != target_model_idx and i != paired_model_idx
+    ][: 2 * num_reference_models]
+    
+    # Extract shadow model signals and memberships
+    shadow_signals = all_signals[:, shadow_indices]
+    shadow_memberships = all_memberships[:, shadow_indices]
+    
+    return shadow_signals, shadow_memberships

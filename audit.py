@@ -11,7 +11,7 @@ import torch.utils.data
 from sklearn.metrics import roc_curve, auc
 from torch.utils.data import Subset
 
-from attacks import tune_offline_a, run_rmia, run_loss
+from attacks import tune_offline_a, run_rmia, run_loss, run_lira, get_shadow_model_signals
 from modules.ramia.ramia_scores import get_topk, get_bottomk, trim_mia_scores
 from visualize import (
     plot_roc,
@@ -274,6 +274,22 @@ def audit_models(
                 num_reference_models,
                 offline_a,
             )
+        elif configs["audit"]["algorithm"] == "LIRA":
+            # LiRA uses shadow models to compute likelihood under OUT distribution
+            shadow_signals, shadow_memberships = get_shadow_model_signals(
+                all_signals,
+                all_memberships,
+                target_model_idx,
+                num_reference_models,
+            )
+            target_memberships = all_memberships[:, target_model_idx]
+            mia_scores = run_lira(
+                all_signals[:, target_model_idx],
+                shadow_signals,
+                shadow_memberships,
+                target_memberships,
+            )
+            logger.info(f"LiRA attack completed for model {target_model_idx}")
         elif configs["audit"]["algorithm"] == "LOSS":
             mia_scores = run_loss(all_signals[:, target_model_idx])
         else:
