@@ -13,7 +13,15 @@ from torch.utils.data import Subset
 
 from attacks import tune_offline_a, run_rmia, run_loss
 from modules.ramia.ramia_scores import get_topk, get_bottomk, trim_mia_scores
-from visualize import plot_roc, plot_roc_log, plot_eps_vs_num_guesses
+from visualize import (
+    plot_roc,
+    plot_roc_log,
+    plot_eps_vs_num_guesses,
+    plot_score_distributions,
+    plot_membership_statistics,
+    plot_attack_results_summary,
+)
+import pandas as pd
 
 
 def compute_attack_results(mia_scores, target_memberships):
@@ -80,6 +88,43 @@ def get_audit_results(report_dir, model_idx, mia_scores, target_memberships, log
         f"{report_dir}/ROC_log_{model_idx}.png",
     )
 
+    # Extract member and non-member scores
+    train_scores = mia_scores.ravel()[target_memberships.ravel() == 1]
+    test_scores = mia_scores.ravel()[target_memberships.ravel() == 0]
+
+    # Create DataFrames for visualization
+    df_train = pd.DataFrame({"score": train_scores})
+    df_test = pd.DataFrame({"score": test_scores})
+
+    # Generate new visualizations
+    plot_score_distributions(
+        train_scores,
+        test_scores,
+        title=f"Model {model_idx} - Score Distributions",
+        save_path=f"{report_dir}/score_distributions_{model_idx}.png",
+        show=False,
+    )
+
+    plot_membership_statistics(
+        df_train,
+        df_test,
+        score_column="score",
+        title=f"Model {model_idx} - Membership Statistics",
+        save_path=f"{report_dir}/membership_statistics_{model_idx}.png",
+        show=False,
+    )
+
+    plot_attack_results_summary(
+        df_train,
+        df_test,
+        score_column="score",
+        attack_name=f"RMIA - Model {model_idx}",
+        save_path=f"{report_dir}/attack_summary_{model_idx}.png",
+        show=False,
+    )
+
+    logger.info(f"Saved visualizations for Model {model_idx}")
+
     np.savez(
         f"{report_dir}/attack_result_{model_idx}",
         fpr=attack_result["fpr"],
@@ -128,6 +173,43 @@ def get_average_audit_results(report_dir, mia_score_list, membership_list, logge
         attack_result["auc"],
         f"{report_dir}/ROC_log_average.png",
     )
+
+    # Extract member and non-member scores
+    train_scores = mia_scores.ravel()[target_memberships.ravel() == 1]
+    test_scores = mia_scores.ravel()[target_memberships.ravel() == 0]
+
+    # Create DataFrames for visualization
+    df_train = pd.DataFrame({"score": train_scores})
+    df_test = pd.DataFrame({"score": test_scores})
+
+    # Generate new visualizations
+    plot_score_distributions(
+        train_scores,
+        test_scores,
+        title="Average - Score Distributions",
+        save_path=f"{report_dir}/score_distributions_average.png",
+        show=False,
+    )
+
+    plot_membership_statistics(
+        df_train,
+        df_test,
+        score_column="score",
+        title="Average - Membership Statistics",
+        save_path=f"{report_dir}/membership_statistics_average.png",
+        show=False,
+    )
+
+    plot_attack_results_summary(
+        df_train,
+        df_test,
+        score_column="score",
+        attack_name="RMIA - Average Results",
+        save_path=f"{report_dir}/attack_summary_average.png",
+        show=False,
+    )
+
+    logger.info("Saved average visualizations")
 
     np.savez(
         f"{report_dir}/attack_result_average",
