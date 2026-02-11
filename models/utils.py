@@ -3,6 +3,8 @@
 import copy
 import json
 import logging
+import GPUtil
+import psutil
 import os
 import pickle
 import time
@@ -399,6 +401,13 @@ def prepare_models(
     for split in range(len(data_split_info)):
         split_info = data_split_info[split]
         baseline_time = time.time()
+        process = psutil.Process(os.getpid())
+        cpu_mem_start = process.memory_info().rss
+        cpu_time_start = process.cpu_times().user
+
+        gpu = GPUtil.getGPUs()[0]   # first GPU
+        gpu_mem_start = gpu.memoryUsed
+
         logger.info(50 * "-")
         logger.info(
             f"Training model {split}: Train size {len(split_info['train'])}, Test size {len(split_info['test'])}"
@@ -495,10 +504,26 @@ def prepare_models(
             )
 
         model_list.append(copy.deepcopy(model))
+        cpu_mem_end = process.memory_info().rss
+        cpu_time_end = process.cpu_times().user
+        elapsed = time.time() - baseline_time
+        
+        gpu = GPUtil.getGPUs()[0]
+        gpu_mem_end = gpu.memoryUsed
+        gpu_load = gpu.load * 100
+
         logger.info(
-            "Training model %s took %s seconds",
+            "Model training %s took %.1f s | "
+            "CPU time %.2f s | "
+            "CPU mem %+0.1f MB | "
+            "GPU mem %+0.1f MB | "
+            "GPU load %.0f%%",
             split,
-            time.time() - baseline_time,
+            elapsed,
+            cpu_time_end - cpu_time_start,
+            (cpu_mem_end - cpu_mem_start) / 1e6,
+            gpu_mem_end - gpu_mem_start,
+            gpu_load
         )
 
         model_idx = split
