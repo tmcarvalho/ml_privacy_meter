@@ -38,8 +38,10 @@ from peft import get_peft_model
 
 
 INPUT_OUTPUT_SHAPE = {
+    "wids": [177, 2],
+    "url": [82, 2],
+    "surgery": [24, 2],
     "lcld": [8, 2],
-    "texas10": [2732, 9],
     "purchases10": [599, 10],
     "student_performance": [30, 3],
     "dropout_success": [36, 3],
