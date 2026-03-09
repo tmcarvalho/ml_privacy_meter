@@ -23,6 +23,7 @@ from tabpfn import TabPFNClassifier
 from tabicl import TabICLClassifier
 from tabdpt import TabDPTClassifier
 from tarte_ai import TARTEBoostRegressor_TabPFN
+from pytorch_tabnet.tab_model import TabNetClassifier
 from trainers.default_trainer import inference_nontorch_models, train, inference, dp_train, train_nontorch_models
 from trainers.fast_train import (
     load_cifar10_data,
@@ -37,6 +38,7 @@ from peft import get_peft_model
 
 
 INPUT_OUTPUT_SHAPE = {
+    "lcld": [8, 2],
     "texas10": [2732, 9],
     "purchases10": [599, 10],
     "student_performance": [30, 3],
@@ -84,6 +86,14 @@ def get_model(model_type: str, dataset_name: str, configs: dict):
         return TabICLClassifier(device="cuda:0")
     if model_type == "tabdpt":
         return TabDPTClassifier(device="cuda:0")
+    if model_type == "tabnet":
+        train_cfg = configs.get("train", {})
+        return TabNetClassifier(
+            n_d=train_cfg.get("n_d", 32),
+            n_a=train_cfg.get("n_a", 32),
+            n_steps=train_cfg.get("n_steps", 3),
+            device_name=train_cfg.get("device", "cuda:0"),
+        )
     if model_type == "tarte": ## is not working
         return TARTEBoostRegressor_TabPFN()
     # TODO: Add other model architectures as needed
@@ -395,7 +405,7 @@ def prepare_models(
 
     model_metadata_dict = {}
     model_list = []
-    new_models = ["lightgbm", "rf", "tabpfn", "tabicl", "tabdpt", "tarte"] #TODO: add other models here!
+    new_models = ["lightgbm", "rf", "tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add other models here!
 
     # for split, split_info in enumerate(data_split_info):
     for split in range(len(data_split_info)):

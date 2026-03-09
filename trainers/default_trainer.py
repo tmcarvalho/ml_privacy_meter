@@ -226,7 +226,7 @@ def train_nontorch_models(
     X_train, y_train = dataloader_to_numpy(train_loader)
     ensembling_models = ["rf"]
     boosting_models = ["lightgbm", "xgboost"]
-    foundation_models = ["tabpfn", "tabicl", "tabdpt", "tarte"]
+    foundation_models = ["tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"]
 
     if configs["model_name"] in boosting_models:
         # model = move_model_to_device(model)

@@ -219,7 +219,7 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
     Returns:
         signals (np.array): Signal value for all samples in all models
     """
-    new_models = ["lightgbm", "rf", "tabpfn", "tabicl", "tabdpt", "tarte"] #TODO: add more
+    new_models = ["lightgbm", "rf", "tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add more
     # Check if signals are available on disk
     signal_file_name = (
         f"{configs['audit']['algorithm'].lower()}_ramia_signals"
