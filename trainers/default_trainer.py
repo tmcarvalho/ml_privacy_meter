@@ -11,6 +11,15 @@ from torch.optim import lr_scheduler
 from sklearn.metrics import accuracy_score, log_loss
 
 
+def _log_loss_with_labels(model, y_true, y_proba):
+    """Compute log loss with explicit labels to handle missing classes in a split."""
+    if hasattr(model, "classes_") and len(getattr(model, "classes_", [])) == y_proba.shape[1]:
+        labels = list(model.classes_)
+    else:
+        labels = list(range(y_proba.shape[1]))
+    return log_loss(y_true, y_proba, labels=labels)
+
+
 def lr_update(step: int, total_epoch: int, train_size: int, initial_lr: float) -> float:
     """
     Updates learning rate using cosine decay schedule,
@@ -226,7 +235,7 @@ def train_nontorch_models(
     X_train, y_train = dataloader_to_numpy(train_loader)
     ensembling_models = ["rf"]
     boosting_models = ["lightgbm", "xgboost"]
-    foundation_models = ["tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"]
+    foundation_models = ["tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"]
 
     if configs["model_name"] in boosting_models:
         # model = move_model_to_device(model)
@@ -266,7 +275,7 @@ def train_nontorch_models(
     
     train_loss = None
     if hasattr(model, "predict_proba"): #loss requires probabilities
-        train_loss = log_loss(y_train, model.predict_proba(X_train))
+        train_loss = _log_loss_with_labels(model, y_train, model.predict_proba(X_train))
 
     print(f"Train Loss: {train_loss:.4f}" if train_loss else "")
     print(f"Train Acc: {train_acc:.4f}")
@@ -343,7 +352,7 @@ def inference_nontorch_models(
     loss = None
     if hasattr(model, "predict_proba"):
         y_proba = model.predict_proba(X_test)
-        loss = log_loss(y_test, y_proba)
+        loss = _log_loss_with_labels(model, y_test, y_proba)
 
     return loss, accuracy
 
