@@ -37,7 +37,16 @@ from trainers.train_transformers import *
 from peft import get_peft_model
 
 
+REAL_TABPFN_MODEL_PATH = "https://huggingface.co/Prior-Labs/tabpfn_2_5/resolve/main/tabpfn-v2.5-classifier-v2.5_real.ckpt"
+
+
 INPUT_OUTPUT_SHAPE = {
+    "46980_MIC": [111, 5],
+    "46956_seismic-bumps": [15, 2],
+    "46907_Another-Dataset-on-used-Fiat-500": [7, 222],
+    "46905_Amazon_employee_access": [9, 2],
+    "46904_airfoil_self_noise": [5, 1456],
+    "46906_anneal": [38, 6],
     "wids": [177, 2],
     "url": [82, 2],
     "surgery": [24, 2],
@@ -84,6 +93,8 @@ def get_model(model_type: str, dataset_name: str, configs: dict):
         return RandomForestClassifier()
     if model_type == "tabpfn":
         return TabPFNClassifier()
+    if model_type == "real-tabpfn":
+        return TabPFNClassifier(model_path=REAL_TABPFN_MODEL_PATH)
     if model_type == "tabicl":
         return TabICLClassifier(device="cuda:0")
     if model_type == "tabdpt":
@@ -137,9 +148,19 @@ def load_existing_model(
         data = load_cifar10_data(dataset, [0], [0], device=device)
         model = NetworkEMA(make_net(data, device=device))
 
-    model_checkpoint_extension = os.path.splitext(model_metadata["model_path"])[1]
+    model_path = model_metadata["model_path"]
+    if not os.path.exists(model_path):
+        # Fallback: try inserting algorithm subfolders (rmia/lira/loss) before "models/"
+        import re
+        for subfolder in ("rmia", "lira", "loss"):
+            candidate = re.sub(r"(logs/[^/]+/[^/]+)/models/", rf"\1/{subfolder}/models/", model_path)
+            if os.path.exists(candidate):
+                model_path = candidate
+                break
+
+    model_checkpoint_extension = os.path.splitext(model_path)[1]
     if model_checkpoint_extension == ".pkl":
-        with open(model_metadata["model_path"], "rb") as file:
+        with open(model_path, "rb") as file:
             model_weight = pickle.load(file)
         # For PyTorch, call load_state_dict
         if hasattr(model, "load_state_dict") and isinstance(model_weight, dict):
@@ -149,10 +170,10 @@ def load_existing_model(
             # Non pytorch modes: LightGBM / TabPFN / sklearn model
             return model_weight
     elif model_checkpoint_extension == ".pt" or model_checkpoint_extension == ".pth":
-        return model.load_state_dict(torch.load(model_metadata["model_path"]))
+        return model.load_state_dict(torch.load(model_path))
     elif model_checkpoint_extension == "":
         if isinstance(model, PreTrainedModel):
-            model = model.from_pretrained(model_metadata["model_path"])
+            model = model.from_pretrained(model_path)
         else:
             raise ValueError(f"Model path is invalid.")
         return model
@@ -229,7 +250,7 @@ def load_models(log_dir, dataset, num_models, configs, logger):
         with open(f"{experiment_dir}/models_metadata.json", "r") as f:
             model_metadata_dict = json.load(f)
         all_memberships = np.load(f"{experiment_dir}/memberships.npy")
-        if len(model_metadata_dict) < num_models:
+        if num_models is not None and len(model_metadata_dict) < num_models:
             return None, None
     else:
         return None, None
@@ -244,7 +265,7 @@ def load_models(log_dir, dataset, num_models, configs, logger):
             configs,
         )
         model_list.append(model_obj)
-        if len(model_list) == num_models:
+        if num_models is not None and len(model_list) == num_models:
             break
     return model_list, all_memberships
 
@@ -407,7 +428,7 @@ def prepare_models(
 
     model_metadata_dict = {}
     model_list = []
-    new_models = ["lightgbm", "rf", "tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add other models here!
+    new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add other models here!
 
     # for split, split_info in enumerate(data_split_info):
     for split in range(len(data_split_info)):
@@ -417,8 +438,8 @@ def prepare_models(
         cpu_mem_start = process.memory_info().rss
         cpu_time_start = process.cpu_times().user
 
-        gpu = GPUtil.getGPUs()[0]   # first GPU
-        gpu_mem_start = gpu.memoryUsed
+        gpus = GPUtil.getGPUs()
+        gpu_mem_start = gpus[0].memoryUsed if gpus else 0
 
         logger.info(50 * "-")
         logger.info(
@@ -515,14 +536,30 @@ def prepare_models(
                 f"The {model_name} is not supported for the {dataset_name}"
             )
 
-        model_list.append(copy.deepcopy(model))
+        model_copy = copy.deepcopy(model)
+        # Move cached GPU tensors (e.g. TabPFN in-context training data) to CPU
+        # so GPU memory doesn't accumulate across model pairs.
+        if hasattr(model_copy, 'to'):
+            try:
+                model_copy.to('cpu')
+            except Exception:
+                pass
+        model_list.append(model_copy)
+        # Also release the original model's GPU memory before the next iteration.
+        if hasattr(model, 'to'):
+            try:
+                model.to('cpu')
+            except Exception:
+                pass
+        del model
+        torch.cuda.empty_cache()
         cpu_mem_end = process.memory_info().rss
         cpu_time_end = process.cpu_times().user
         elapsed = time.time() - baseline_time
-        
-        gpu = GPUtil.getGPUs()[0]
-        gpu_mem_end = gpu.memoryUsed
-        gpu_load = gpu.load * 100
+
+        gpus = GPUtil.getGPUs()
+        gpu_mem_end = gpus[0].memoryUsed if gpus else 0
+        gpu_load = gpus[0].load * 100 if gpus else 0.0
 
         logger.info(
             "Model training %s took %.1f s | "
@@ -542,7 +579,7 @@ def prepare_models(
 
         if model_name in new_models:
             with open(f"{log_dir}/model_{model_idx}.pkl", "wb") as f:
-                pickle.dump(model, f)
+                pickle.dump(model_copy, f)
             train_config_metadata = dict(configs.get("train", {}))
             model_metadata_dict[model_idx] = {
                 "num_train": len(split_info["train"]),
@@ -557,7 +594,7 @@ def prepare_models(
             }
         else:
             with open(f"{log_dir}/model_{model_idx}.pkl", "wb") as f:
-                pickle.dump(model.state_dict(), f)
+                pickle.dump(model_copy.state_dict(), f)
 
             model_metadata_dict[model_idx] = {
                 "num_train": len(split_info["train"]),
@@ -575,8 +612,9 @@ def prepare_models(
                 "dataset": dataset_name,
             }
 
-    with open(f"{log_dir}/models_metadata.json", "w") as f:
-        json.dump(model_metadata_dict, f, indent=4)
+        # Write after each model so a crashed run can be resumed by hybrid mode.
+        with open(f"{log_dir}/models_metadata.json", "w") as f:
+            json.dump(model_metadata_dict, f, indent=4)
 
     return model_list
 
