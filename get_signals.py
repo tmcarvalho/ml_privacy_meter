@@ -146,8 +146,18 @@ def get_probs_nontorch_models(
         # softmax
         probs = stable_softmax(logits)
 
-        # select true class probability
-        true_probs = probs[np.arange(len(y_batch)), y_batch]
+        # Select true-class probability using model classes when available.
+        y_arr = np.asarray(y_batch).reshape(-1)
+        if hasattr(model, "classes_") and len(getattr(model, "classes_", [])) == probs.shape[1]:
+            class_to_idx = {cls: idx for idx, cls in enumerate(model.classes_)}
+            class_indices = np.array([class_to_idx.get(y, -1) for y in y_arr], dtype=int)
+        else:
+            class_indices = y_arr.astype(int, copy=False)
+
+        valid = (class_indices >= 0) & (class_indices < probs.shape[1])
+        true_probs = np.full(len(y_arr), 1e-12, dtype=np.float64)
+        row_idx = np.arange(len(y_arr))[valid]
+        true_probs[valid] = probs[row_idx, class_indices[valid]]
         softmax_list.append(true_probs.reshape(-1, 1))
 
     logger.info("Model exposing via {}.".format(model_exposing))
@@ -219,7 +229,7 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
     Returns:
         signals (np.array): Signal value for all samples in all models
     """
-    new_models = ["lightgbm", "rf", "tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add more
+    new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add more
     # Check if signals are available on disk
     signal_file_name = (
         f"{configs['audit']['algorithm'].lower()}_ramia_signals"
