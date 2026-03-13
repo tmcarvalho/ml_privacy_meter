@@ -1,4 +1,5 @@
 import os.path
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from typing import Optional, Union
 
 import numpy as np
@@ -282,17 +283,35 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
         if len(data.shape) != 2:
             data = data.view(-1, *data.shape[2:])
             targets = targets.view(data.shape[0], -1)
-    for model in models_list:
-        if model_name.lower() in new_models:
-            # Use the LightGBM and foundation models
-            signals.append(
-                get_probs_nontorch_models(model, logger, data, targets, batch_size)
-            )
+
+    n_jobs = configs["audit"].get("n_jobs", 1)
+    is_new_model = model_name.lower() in new_models
+
+    def _compute_one(idx_model):
+        idx, model = idx_model
+        if is_new_model:
+            return idx, get_probs_nontorch_models(model, logger, data, targets, batch_size)
         else:
-            # Use the original PyTorch/HuggingFace function
-            signals.append(
-                get_softmax(model, data, targets, batch_size, device, pad_token_id=pad_token_id)
-            )
+            return idx, get_softmax(model, data, targets, batch_size, device, pad_token_id=pad_token_id)
+
+    workers = len(models_list) if n_jobs == -1 else n_jobs
+    if workers > 1 and is_new_model:
+        logger.info("Using %d parallel workers for signal computation.", workers)
+        results = [None] * len(models_list)
+        # Use processes for CPU-bound sklearn-style models to bypass the GIL;
+        # threads are sufficient for PyTorch models which release the GIL themselves.
+        torch_models = {"tabdpt", "tabnet", "tarte"}
+        Executor = ThreadPoolExecutor if model_name.lower() in torch_models else ProcessPoolExecutor
+        with Executor(max_workers=workers) as executor:
+            futures = {executor.submit(_compute_one, (i, m)): i for i, m in enumerate(models_list)}
+            for future in as_completed(futures):
+                idx, sig = future.result()
+                results[idx] = sig
+        signals = results
+    else:
+        for i, model in enumerate(models_list):
+            _, sig = _compute_one((i, model))
+            signals.append(sig)
 
     signals = np.concatenate(signals, axis=1)
     os.makedirs(signal_dir, exist_ok=True)
