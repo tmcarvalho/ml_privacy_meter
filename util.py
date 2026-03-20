@@ -58,7 +58,7 @@ def setup_log(report_dir: str, name: str, save_file: bool) -> logging.Logger:
         if not Path(filename).is_file():
             open(filename, "w+").close()
 
-        log_handler = logging.FileHandler(filename, mode="w")
+        log_handler = logging.FileHandler(filename, mode="a")
         log_handler.setLevel(logging.INFO)
         log_handler.setFormatter(log_format)
         my_logger.addHandler(log_handler)
