@@ -1,5 +1,5 @@
 import os.path
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Union
 
 import numpy as np
@@ -295,14 +295,18 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
             return idx, get_softmax(model, data, targets, batch_size, device, pad_token_id=pad_token_id)
 
     workers = len(models_list) if n_jobs == -1 else n_jobs
-    if workers > 1 and is_new_model:
+    # rf/lightgbm are CPU-only sklearn models — not safe to run concurrently across models.
+    # All other supported models (tabpfn, real-tabpfn, tabicl, tabdpt, tabnet, tarte) are
+    # PyTorch/CUDA-based and release the GIL during GPU ops, so ThreadPoolExecutor
+    # parallelism across models is safe.
+    # Note: tabicl uses n_estimators=8 internally, so 4 parallel models = ~32 concurrent
+    # forward passes — watch GPU memory on smaller GPUs.
+    torch_models = {"tabdpt", "tabnet", "tarte", "tabpfn", "real-tabpfn", "tabicl"}
+    use_threads = model_name.lower() in torch_models
+    if workers > 1 and is_new_model and use_threads:
         logger.info("Using %d parallel workers for signal computation.", workers)
         results = [None] * len(models_list)
-        # Use processes for CPU-bound sklearn-style models to bypass the GIL;
-        # threads are sufficient for PyTorch models which release the GIL themselves.
-        torch_models = {"tabdpt", "tabnet", "tarte"}
-        Executor = ThreadPoolExecutor if model_name.lower() in torch_models else ProcessPoolExecutor
-        with Executor(max_workers=workers) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(_compute_one, (i, m)): i for i, m in enumerate(models_list)}
             for future in as_completed(futures):
                 idx, sig = future.result()
