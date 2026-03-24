@@ -41,12 +41,18 @@ REAL_TABPFN_MODEL_PATH = "https://huggingface.co/Prior-Labs/tabpfn_2_5/resolve/m
 
 
 INPUT_OUTPUT_SHAPE = {
+    "46908_APSFailure": [169, 2],
+    "us_stocks_financial": [229, 2],
+    "strikes": [6, 3],
+    "credit_rating": [30, 10],
+    "annthyroid": [6, 2],
+    "aloi": [27, 2],
     "46980_MIC": [111, 5],
     "46956_seismic-bumps": [15, 2],
     "46907_Another-Dataset-on-used-Fiat-500": [7, 222],
     "46905_Amazon_employee_access": [9, 2],
     "46904_airfoil_self_noise": [5, 1456],
-    "46906_anneal": [38, 6],
+    "46906_anneal": [31, 4],
     "wids": [177, 2],
     "url": [82, 2],
     "surgery": [24, 2],
@@ -449,7 +455,7 @@ def prepare_models(
         model_name, dataset_name, batch_size, device = (
             configs["train"]["model_name"],
             configs["data"]["dataset"],
-            configs["train"].get("batch_size", None),
+            configs["train"].get("batch_size", 256),
             configs["train"].get("device", "cpu")
         )
 
@@ -484,11 +490,18 @@ def prepare_models(
                 torch.utils.data.Subset(dataset, split_info["test"]),
                 batch_size=batch_size,
             )
+            # Inject log_dir and dataset_name into train config for tuning save/load
+            train_config = {
+                **configs["train"],
+                "log_dir": configs["run"]["log_dir"],
+                "dataset_name": dataset_name,
+            }
+
             if model_name in new_models:
                 model = train_nontorch_models(
                     get_model(model_name, dataset_name, configs),
                     train_loader,
-                    configs["train"],
+                    train_config,
                     test_loader,
                 )
                 test_loss, test_acc = inference_nontorch_models(model, test_loader)
@@ -500,7 +513,7 @@ def prepare_models(
                 model = train(
                     get_model(model_name, dataset_name, configs),
                     train_loader,
-                    configs["train"],
+                    train_config,
                     test_loader,
                 )
                 test_loss, test_acc = inference(model, test_loader, device)
