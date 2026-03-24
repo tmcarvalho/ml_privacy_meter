@@ -58,6 +58,13 @@ def train(
     Returns:
         torch.nn.Module: Trained model.
     """
+    # Optuna hyperparameter tuning (opt-in via configs["hyperparameter_tuning"])
+    if configs.get("hyperparameter_tuning", False):
+        from trainers.tuning import tune_mlp
+        X_train, y_train = dataloader_to_numpy(train_loader)
+        best_params = tune_mlp(X_train, y_train, model, configs)
+        configs = {**configs, **best_params}
+
     # Ensure the model is moved to the correct device (e.g., cuda:1 or cpu)
     device = configs.get("device", "cpu")
     model = model.to(device)  # Make sure the model is on the correct device
@@ -237,22 +244,37 @@ def train_nontorch_models(
     boosting_models = ["lightgbm", "xgboost"]
     foundation_models = ["tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"]
 
+    # Optuna hyperparameter tuning (opt-in via configs["hyperparameter_tuning"])
+    if configs.get("hyperparameter_tuning", False) and configs["model_name"] in (ensembling_models + boosting_models + ["tabnet"]):
+        from trainers.tuning import tune_nontorch
+        best_params = tune_nontorch(X_train, y_train, configs["model_name"], configs)
+        configs = {**configs, **best_params}
+
     if configs["model_name"] in boosting_models:
-        # model = move_model_to_device(model)
         model.set_params(
             n_estimators=configs.get("n_estimators", 100),
             learning_rate=configs.get("learning_rate", 0.1),
             max_depth=configs.get("max_depth", 5),
-            min_child_weight=configs.get("min_child_weight", 31),
+            num_leaves=configs.get("num_leaves", 31),
+            min_child_samples=configs.get("min_child_samples", 20),
+            subsample=configs.get("subsample", 1.0),
+            colsample_bytree=configs.get("colsample_bytree", 1.0),
+            reg_alpha=configs.get("reg_alpha", 0.0),
+            reg_lambda=configs.get("reg_lambda", 0.0),
             random_state=configs.get("random_state", 42),
+            n_jobs=-1,
+            verbose=-1,
         )
-    
+
     if configs["model_name"] in ensembling_models:
-        # model = move_model_to_device(model)
         model.set_params(
             n_estimators=configs.get("n_estimators", 100),
             max_depth=configs.get("max_depth", 5),
+            min_samples_split=configs.get("min_samples_split", 2),
+            min_samples_leaf=configs.get("min_samples_leaf", 1),
+            max_features=configs.get("max_features", "sqrt"),
             random_state=configs.get("random_state", 42),
+            n_jobs=-1,
         )
 
     if configs["model_name"] in foundation_models:
@@ -267,7 +289,29 @@ def train_nontorch_models(
 
         F.scaled_dot_product_attention = sdpa_ignore_gqa
 
-    model.fit(X_train, y_train)
+    if configs["model_name"] == "tabnet":
+        n_train = len(X_train)
+        batch_size = min(configs.get("batch_size", 256), n_train)
+        virtual_batch_size = min(configs.get("virtual_batch_size", 64), batch_size)
+        tabnet_params = dict(
+            n_d=configs.get("n_d", 32),
+            n_a=configs.get("n_d", 32),  # keep n_a == n_d
+            n_steps=configs.get("n_steps", 3),
+            gamma=configs.get("gamma", 1.3),
+            seed=configs.get("random_state", 42),
+        )
+        if configs.get("tabnet_lr") is not None:
+            tabnet_params["optimizer_params"] = {"lr": configs["tabnet_lr"]}
+        model.set_params(**tabnet_params)
+        model.fit(
+            X_train, y_train,
+            batch_size=batch_size,
+            virtual_batch_size=virtual_batch_size,
+            patience=configs.get("patience", 15),
+            max_epochs=configs.get("max_epochs", 200),
+        )
+    else:
+        model.fit(X_train, y_train)
     
     #TODO: add other models here
     y_pred = model.predict(X_train)
@@ -360,8 +404,11 @@ def inference_nontorch_models(
 def dataloader_to_numpy(loader):
     X, y = [], []
     for data, target in loader:
-        X.append(data.cpu().numpy().reshape(1, -1))
-        y.append(np.array([target.item()]))
+        d = data.cpu().numpy()
+        if d.ndim == 1:
+            d = d.reshape(1, -1)
+        X.append(d)
+        y.append(target.cpu().numpy().reshape(-1))
     return np.vstack(X), np.concatenate(y)
 
 
