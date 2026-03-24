@@ -287,22 +287,43 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
     n_jobs = configs["audit"].get("n_jobs", 1)
     is_new_model = model_name.lower() in new_models
 
+    # rf/lightgbm are CPU-only sklearn models — not safe to run concurrently across models.
+    # All other supported models (tabpfn, real-tabpfn, tabicl, tabdpt, tabnet, tarte) are
+    # PyTorch/CUDA-based and release the GIL during GPU ops.
+    torch_models = {"tabdpt", "tabnet", "tarte", "tabpfn", "real-tabpfn", "tabicl"}
+    use_threads = model_name.lower() in torch_models
+
+    # Models are moved to CPU after training to free GPU memory between training runs.
+    # Move them back to GPU for inference — CPU inference with TabPFN/TabICL/TabDPT on
+    # large datasets is orders of magnitude slower than GPU.
+    is_gpu_model = model_name.lower() in torch_models
+    if isinstance(device, int):
+        infer_device = f"cuda:{device}"
+    elif str(device).isdigit():
+        infer_device = f"cuda:{device}"
+    else:
+        infer_device = str(device)
+
+    def _move_model(model, target_device):
+        if hasattr(model, "to"):
+            try:
+                model.to(target_device)
+            except Exception:
+                pass
+
     def _compute_one(idx_model):
         idx, model = idx_model
         if is_new_model:
-            return idx, get_probs_nontorch_models(model, logger, data, targets, batch_size)
+            if is_gpu_model:
+                _move_model(model, infer_device)
+            sig = get_probs_nontorch_models(model, logger, data, targets, batch_size)
+            if is_gpu_model:
+                _move_model(model, "cpu")
+            return idx, sig
         else:
             return idx, get_softmax(model, data, targets, batch_size, device, pad_token_id=pad_token_id)
 
     workers = len(models_list) if n_jobs == -1 else n_jobs
-    # rf/lightgbm are CPU-only sklearn models — not safe to run concurrently across models.
-    # All other supported models (tabpfn, real-tabpfn, tabicl, tabdpt, tabnet, tarte) are
-    # PyTorch/CUDA-based and release the GIL during GPU ops, so ThreadPoolExecutor
-    # parallelism across models is safe.
-    # Note: tabicl uses n_estimators=8 internally, so 4 parallel models = ~32 concurrent
-    # forward passes — watch GPU memory on smaller GPUs.
-    torch_models = {"tabdpt", "tabnet", "tarte", "tabpfn", "real-tabpfn", "tabicl"}
-    use_threads = model_name.lower() in torch_models
     if workers > 1 and is_new_model and use_threads:
         logger.info("Using %d parallel workers for signal computation.", workers)
         results = [None] * len(models_list)
