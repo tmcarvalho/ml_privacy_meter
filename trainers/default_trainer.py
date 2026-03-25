@@ -67,7 +67,9 @@ def train(
 
     # Ensure the model is moved to the correct device (e.g., cuda:1 or cpu)
     device = configs.get("device", "cpu")
-    model = model.to(device)  # Make sure the model is on the correct device
+    if device.startswith("cuda") and torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+    model = model.to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = get_optimizer(model, configs)
@@ -120,7 +122,9 @@ def train(
 
         print(f"Epoch {epoch_idx + 1} took {time.time() - start_time:.2f} seconds")
 
-    # Move the model back to CPU if needed (this is optional)
+    # Unwrap DataParallel before returning so callers always get a plain module.
+    if isinstance(model, nn.DataParallel):
+        model = model.module
     model.to("cpu")
     return model
 

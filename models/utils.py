@@ -69,7 +69,7 @@ INPUT_OUTPUT_SHAPE = {
 }
 
 
-def get_model(model_type: str, dataset_name: str, configs: dict):
+def get_model(model_type: str, dataset_name: str, configs: dict, device: str = None):
     """
     Instantiate and return a model based on the given model type and dataset name.
 
@@ -101,17 +101,18 @@ def get_model(model_type: str, dataset_name: str, configs: dict):
         return TabPFNClassifier()
     if model_type == "real-tabpfn":
         return TabPFNClassifier(model_path=REAL_TABPFN_MODEL_PATH)
+    _device = device or configs.get("train", {}).get("device", "cuda:0")
     if model_type == "tabicl":
-        return TabICLClassifier(device="cuda:0")
+        return TabICLClassifier(device=_device)
     if model_type == "tabdpt":
-        return TabDPTClassifier(device="cuda:0")
+        return TabDPTClassifier(device=_device)
     if model_type == "tabnet":
         train_cfg = configs.get("train", {})
         return TabNetClassifier(
             n_d=train_cfg.get("n_d", 32),
             n_a=train_cfg.get("n_a", 32),
             n_steps=train_cfg.get("n_steps", 3),
-            device_name=train_cfg.get("device", "cuda:0"),
+            device_name=_device,
         )
     if model_type == "tarte": ## is not working
         return TARTEBoostRegressor_TabPFN()
