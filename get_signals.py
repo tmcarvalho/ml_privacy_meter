@@ -319,6 +319,7 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
             sig = get_probs_nontorch_models(model, logger, data, targets, batch_size)
             if is_gpu_model:
                 _move_model(model, "cpu")
+                torch.cuda.empty_cache()
             return idx, sig
         else:
             return idx, get_softmax(model, data, targets, batch_size, device, pad_token_id=pad_token_id)
