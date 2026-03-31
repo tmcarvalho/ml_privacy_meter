@@ -369,42 +369,47 @@ def dp_train_models(
     return model_list
 
 
-def split_dataset_for_training(dataset_size, num_model_pairs):
+def split_dataset_for_training(dataset_size, num_model_pairs, labels=None):
     """
     Split dataset into training and test partitions for model pairs.
 
     Args:
         dataset_size (int): Total number of samples in the dataset.
         num_model_pairs (int): Number of model pairs to be trained, with each pair trained on different halves of the dataset.
+        labels (array-like, optional): Class labels for stratified splitting. When provided,
+            each half is guaranteed to contain all classes present in the dataset, preventing
+            log_loss failures on imbalanced datasets.
 
     Returns:
         data_split (list): List of dictionaries containing training and test split indices for each model.
         master_keep (np.array): D boolean array indicating the membership of samples in each model's training set.
     """
+    from sklearn.model_selection import StratifiedShuffleSplit
+
     data_splits = []
     indices = np.arange(dataset_size)
     split_index = len(indices) // 2
     master_keep = np.full((2 * num_model_pairs, dataset_size), True, dtype=bool)
 
+    # Stratification requires every class to have at least 2 members.
+    min_class_count = np.min(np.bincount(np.asarray(labels).astype(int))) if labels is not None else 0
+    use_stratified = labels is not None and len(np.unique(labels)) > 1 and min_class_count >= 2
+
     for i in range(num_model_pairs):
-        np.random.shuffle(indices)
-        master_keep[i * 2, indices[split_index:]] = False
-        master_keep[i * 2 + 1, indices[:split_index]] = False
-        keep = master_keep[i * 2, :]
-        train_indices = np.where(keep)[0]
-        test_indices = np.where(~keep)[0]
-        data_splits.append(
-            {
-                "train": train_indices,
-                "test": test_indices,
-            }
-        )
-        data_splits.append(
-            {
-                "train": test_indices,
-                "test": train_indices,
-            }
-        )
+        if use_stratified:
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=i)
+            first_half, second_half = next(sss.split(indices, labels))
+        else:
+            np.random.shuffle(indices)
+            first_half = indices[:split_index]
+            second_half = indices[split_index:]
+
+        master_keep[i * 2, second_half] = False
+        master_keep[i * 2 + 1, first_half] = False
+        train_indices = np.where(master_keep[i * 2, :])[0]
+        test_indices = np.where(~master_keep[i * 2, :])[0]
+        data_splits.append({"train": train_indices, "test": test_indices})
+        data_splits.append({"train": test_indices, "test": train_indices})
 
     return data_splits, master_keep
 

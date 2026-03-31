@@ -12,11 +12,22 @@ from sklearn.metrics import accuracy_score, log_loss
 
 
 def _log_loss_with_labels(model, y_true, y_proba):
-    """Compute log loss with explicit labels to handle missing classes in a split."""
+    """Compute log loss with explicit labels to handle missing classes in a split.
+
+    Returns nan when y_true or the model's learned classes contain fewer than 2
+    unique classes (e.g. highly imbalanced datasets at small context sizes where
+    a training split ends up with only one class).
+    """
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
+    if y_proba.shape[1] < 2:
+        return float("nan")
     if hasattr(model, "classes_") and len(getattr(model, "classes_", [])) == y_proba.shape[1]:
         labels = list(model.classes_)
     else:
         labels = list(range(y_proba.shape[1]))
+    if len(labels) < 2:
+        return float("nan")
     return log_loss(y_true, y_proba, labels=labels)
 
 
