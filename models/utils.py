@@ -101,7 +101,8 @@ def get_model(model_type: str, dataset_name: str, configs: dict, device: str = N
         return TabPFNClassifier()
     if model_type == "real-tabpfn":
         return TabPFNClassifier(model_path=REAL_TABPFN_MODEL_PATH)
-    _device = device or configs.get("train", {}).get("device", "cuda:0")
+    _raw = device or configs.get("train", {}).get("device", "cuda:0")
+    _device = f"cuda:{_raw}" if isinstance(_raw, int) else _raw
     if model_type == "tabicl":
         return TabICLClassifier(device=_device)
     if model_type == "tabdpt":
@@ -268,7 +269,7 @@ def load_models(log_dir, dataset, num_models, configs, logger):
         model_obj = load_existing_model(
             model_metadata_dict[str(model_idx)],
             dataset,
-            configs["audit"]["device"],
+            (lambda d: f"cuda:{d}" if isinstance(d, int) else d)(configs["audit"]["device"]),
             configs,
         )
         model_list.append(model_obj)
@@ -308,7 +309,7 @@ def dp_load_models(log_dir, dataset, num_models, configs, logger):
         model_obj = dp_load_existing_model(
             model_metadata_dict[str(model_idx)],
             dataset,
-            configs["audit"]["device"],
+            (lambda d: f"cuda:{d}" if isinstance(d, int) else d)(configs["audit"]["device"]),
             configs,
         )
         model_list.append(model_obj)
