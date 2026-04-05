@@ -293,6 +293,10 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
             targets = targets.view(data.shape[0], -1)
 
     n_jobs = configs["audit"].get("n_jobs", 1)
+    # TabICL/TabDPT load large models into RAM per worker — cap to 1 on big datasets
+    # to avoid RAM OOM when n_jobs=-1 would spawn dozens of workers each holding a model copy.
+    if model_name in ("tabicl", "tabdpt") and len(dataset) > 10_000:
+        n_jobs = 1
     is_new_model = model_name.lower() in new_models
 
     # rf/lightgbm are CPU-only sklearn models — not safe to run concurrently across models.
