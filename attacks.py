@@ -191,8 +191,23 @@ def run_lira(
     """
     from scipy.stats import norm
     
-    target_signals = target_signals.ravel()
+    target_signals = target_signals.ravel().copy()
     target_memberships = target_memberships.ravel()
+
+    # Replace NaN/Inf in signals (can occur with TabICL on large datasets)
+    finite_mask = np.isfinite(target_signals)
+    if not finite_mask.all():
+        fill = np.nanmedian(target_signals) if finite_mask.any() else 0.0
+        target_signals[~finite_mask] = fill
+
+    shadow_model_signals = shadow_model_signals.copy()
+    shadow_finite = np.isfinite(shadow_model_signals)
+    if not shadow_finite.all():
+        col_medians = np.nanmedian(shadow_model_signals, axis=0)
+        for j in range(shadow_model_signals.shape[1]):
+            bad = ~shadow_finite[:, j]
+            shadow_model_signals[bad, j] = col_medians[j] if np.isfinite(col_medians[j]) else 0.0
+
     n_samples = len(target_signals)
     
     # For each sample, compute μ of OUT predictions (per-sample)
