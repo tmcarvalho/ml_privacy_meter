@@ -261,6 +261,13 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
 
     batch_size = configs["audit"]["batch_size"]  # Batch size used for inferring signals
     model_name = configs["train"]["model_name"]  # Algorithm used for training models
+    # TabICL/TabDPT compute O(batch × n_context) attention — auto-cap to avoid OOM on large datasets
+    if model_name in ("tabicl", "tabdpt"):
+        n_context = len(dataset)
+        # Keep attention matrix under ~50M elements per batch (conservative for 16 GB GPU)
+        max_batch = max(1, 50_000_000 // max(n_context, 1))
+        if batch_size > max_batch:
+            batch_size = max_batch
     _raw_device = configs["audit"]["device"]  # GPU device used for inferring signals
     device = f"cuda:{_raw_device}" if isinstance(_raw_device, int) else _raw_device
     if "tokenizer" in configs["data"].keys():
