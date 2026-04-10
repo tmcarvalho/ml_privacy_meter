@@ -1,6 +1,6 @@
 run:
   random_seed: 12345
-  log_dir: ml_privacy_meter/logs/locations/rf
+  log_dir: ml_privacy_meter/logs/locations_mlp/mlp
   time_log: true
   num_experiments: 1
 audit:
@@ -15,11 +15,13 @@ data:
   dataset: locations
   data_dir: data/original
 train:
-  model_name: rf
-  n_estimators: 200
-  max_depth: null
-  random_state: 42
-  n_jobs: -1
+  model_name: mlp
+  device: cpu
+  batch_size: 256
+  optimizer: SGD
+  learning_rate: 0.01
+  weight_decay: 0.0001
+  epochs: 100
   hyperparameter_tuning: true
   tuning_n_trials: 30
   tuning_cv: 3

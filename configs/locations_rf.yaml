@@ -1,6 +1,6 @@
 run:
   random_seed: 12345
-  log_dir: ml_privacy_meter/logs/locations/rf
+  log_dir: ml_privacy_meter/logs/locations_rf/rf
   time_log: true
   num_experiments: 1
 audit:

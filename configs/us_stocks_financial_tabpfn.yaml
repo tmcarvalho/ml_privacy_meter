@@ -1,25 +1,19 @@
 run:
   random_seed: 12345
-  log_dir: ml_privacy_meter/logs/locations/rf
+  log_dir: ml_privacy_meter/logs/us_stocks_financial_tabpfn/tabpfn
   time_log: true
   num_experiments: 1
 audit:
   privacy_game: privacy_loss_model
   algorithm: RMIA
   num_ref_models: 1
-  device: cpu
+  device: 0
   report_log: report_rmia
   batch_size: 5000
   n_jobs: -1
 data:
-  dataset: locations
+  dataset: us_stocks_financial
   data_dir: data/original
 train:
-  model_name: rf
-  n_estimators: 200
-  max_depth: null
-  random_state: 42
-  n_jobs: -1
-  hyperparameter_tuning: true
-  tuning_n_trials: 30
-  tuning_cv: 3
+  model_name: tabpfn
+  device: 0

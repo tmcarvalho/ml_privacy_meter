@@ -1,6 +1,6 @@
 run:
   random_seed: 12345
-  log_dir: ml_privacy_meter/logs/locations/rf
+  log_dir: ml_privacy_meter/logs/cirrhosis_rf/rf
   time_log: true
   num_experiments: 1
 audit:
@@ -12,7 +12,7 @@ audit:
   batch_size: 5000
   n_jobs: -1
 data:
-  dataset: locations
+  dataset: cirrhosis
   data_dir: data/original
 train:
   model_name: rf
