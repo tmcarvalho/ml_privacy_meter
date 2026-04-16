@@ -38,11 +38,29 @@ def main():
         default="configs/cifar10.yaml",
         help="Path to the configuration YAML file.",
     )
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        default=None,
+        help="Run RMIA in online mode (P(x) = (P_in + P_out) / 2). Overrides online_attack in the config.",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        default=None,
+        help="Run RMIA in offline mode (uses offline_a approximation). Overrides online_attack in the config.",
+    )
     args = parser.parse_args()
 
     # Load configuration file
     with open(args.cf, "rb") as f:
         configs = yaml.load(f, Loader=yaml.Loader)
+
+    # CLI flags override the config value; --online takes precedence over --offline
+    if args.online:
+        configs["audit"]["online_attack"] = True
+    elif args.offline:
+        configs["audit"]["online_attack"] = False
 
     # Validate configurations
     check_configs(configs)
@@ -52,9 +70,11 @@ def main():
 
     # Create necessary directories
     log_dir = configs["run"]["log_dir"]
+    online_attack = configs["audit"].get("online_attack", False)
+    report_suffix = "_online" if online_attack else ""
     directories = {
         "log_dir": log_dir,
-        "report_dir": f"{log_dir}/report",
+        "report_dir": f"{log_dir}/report{report_suffix}",
         "signal_dir": f"{log_dir}/signals",
         "data_dir": configs["data"]["data_dir"],
     }
