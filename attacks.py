@@ -4,6 +4,22 @@ import numpy as np
 from sklearn.metrics import auc, roc_curve
 
 
+def _get_reference_columns(
+    all_signals: np.ndarray,
+    target_model_idx: int,
+    num_reference_models: int,
+) -> list:
+    """Return reference model column indices (excluding target and its paired model)."""
+    paired_model_idx = (
+        target_model_idx + 1 if target_model_idx % 2 == 0 else target_model_idx - 1
+    )
+    return [
+        i
+        for i in range(all_signals.shape[1])
+        if i != target_model_idx and i != paired_model_idx
+    ][: 2 * num_reference_models]
+
+
 def get_rmia_out_signals(
     all_signals: np.ndarray,
     all_memberships: np.ndarray,
@@ -11,7 +27,7 @@ def get_rmia_out_signals(
     num_reference_models: int,
 ) -> np.ndarray:
     """
-    Get average prediction probability of samples over offline reference models (excluding the target model).
+    Get average prediction probability of samples over OUT reference models (excluding the target model).
 
     Args:
         all_signals (np.ndarray): Softmax value of all samples in every model.
@@ -22,21 +38,40 @@ def get_rmia_out_signals(
     Returns:
         np.ndarray: Average softmax value for each sample over OUT reference models.
     """
-    paired_model_idx = (
-        target_model_idx + 1 if target_model_idx % 2 == 0 else target_model_idx - 1
-    )
-    # Add non-target and non-paired model indices
-    columns = [
-        i
-        for i in range(all_signals.shape[1])
-        if i != target_model_idx and i != paired_model_idx
-    ][: 2 * num_reference_models]
+    columns = _get_reference_columns(all_signals, target_model_idx, num_reference_models)
     selected_signals = all_signals[:, columns]
     non_members = ~all_memberships[:, columns]
     out_signals = selected_signals * non_members
-    # Sort the signals such that only the non-zero signals (out signals) are kept
+    # Sort so that only the non-zero (out) signals are kept
     out_signals = -np.sort(-out_signals, axis=1)[:, :num_reference_models]
     return out_signals
+
+
+def get_rmia_in_signals(
+    all_signals: np.ndarray,
+    all_memberships: np.ndarray,
+    target_model_idx: int,
+    num_reference_models: int,
+) -> np.ndarray:
+    """
+    Get average prediction probability of samples over IN reference models (online variant).
+
+    Args:
+        all_signals (np.ndarray): Softmax value of all samples in every model.
+        all_memberships (np.ndarray): Membership matrix for all models.
+        target_model_idx (int): Target model index.
+        num_reference_models (int): Number of reference models used for the attack.
+
+    Returns:
+        np.ndarray: Average softmax value for each sample over IN reference models.
+    """
+    columns = _get_reference_columns(all_signals, target_model_idx, num_reference_models)
+    selected_signals = all_signals[:, columns]
+    members = all_memberships[:, columns]
+    in_signals = selected_signals * members
+    # Sort so that only the non-zero (in) signals are kept
+    in_signals = -np.sort(-in_signals, axis=1)[:, :num_reference_models]
+    return in_signals
 
 
 def tune_offline_a(
@@ -94,34 +129,48 @@ def run_rmia(
     population_signals: np.ndarray,
     all_memberships: np.ndarray,
     num_reference_models: int,
-    offline_a: float,
+    offline_a: float = 0.0,
+    online: bool = False,
 ) -> np.ndarray:
     """
-    Attack a target model using the RMIA attack with the help of offline reference models.
+    Attack a target model using RMIA in either offline or online mode.
+
+    Offline: P(x) ≈ (1+a)/2 · P_out(x) + (1-a)/2  (uses only OUT reference models)
+    Online:  P(x) = (P_in(x) + P_out(x)) / 2        (uses both IN and OUT reference models)
 
     Args:
         target_model_idx (int): Index of the target model.
-        all_signals (np.ndarray): Softmax value of all samples in the target model.
-        population_signals (np.ndarray): Softmax value of all population samples in the target model.
+        all_signals (np.ndarray): Softmax value of all samples in all models.
+        population_signals (np.ndarray): Softmax value of population samples in all models.
         all_memberships (np.ndarray): Membership matrix for all models.
         num_reference_models (int): Number of reference models used for the attack.
-        offline_a (float): Coefficient offline_a is used to approximate p(x) using P_out in the offline setting.
+        offline_a (float): Approximation coefficient for the offline setting (ignored when online=True).
+        online (bool): If True, run the online variant using both IN and OUT reference models.
 
     Returns:
-        np.ndarray: MIA score for all samples (a larger score indicates higher chance of being member).
+        np.ndarray: MIA score for all samples (higher = more likely to be a member).
     """
     target_signals = all_signals[:, target_model_idx]
+
     out_signals = get_rmia_out_signals(
         all_signals, all_memberships, target_model_idx, num_reference_models
     )
     mean_out_x = np.mean(out_signals, axis=1)
-    mean_x = (1 + offline_a) / 2 * mean_out_x + (1 - offline_a) / 2
+
+    if online:
+        in_signals = get_rmia_in_signals(
+            all_signals, all_memberships, target_model_idx, num_reference_models
+        )
+        mean_in_x = np.mean(in_signals, axis=1)
+        mean_x = (mean_in_x + mean_out_x) / 2
+    else:
+        mean_x = (1 + offline_a) / 2 * mean_out_x + (1 - offline_a) / 2
+
     prob_ratio_x = target_signals.ravel() / mean_x
 
+    # Population samples are always OUT for all reference models
     z_signals = population_signals[:, target_model_idx]
-    population_memberships = np.zeros_like(population_signals).astype(
-        bool
-    )  # All population data are OUT for all models
+    population_memberships = np.zeros_like(population_signals).astype(bool)
     z_out_signals = get_rmia_out_signals(
         population_signals,
         population_memberships,
@@ -129,7 +178,13 @@ def run_rmia(
         num_reference_models,
     )
     mean_out_z = np.mean(z_out_signals, axis=1)
-    mean_z = (1 + offline_a) / 2 * mean_out_z + (1 - offline_a) / 2
+
+    if online:
+        # Population is never IN, so P(z) = P_out(z)
+        mean_z = mean_out_z
+    else:
+        mean_z = (1 + offline_a) / 2 * mean_out_z + (1 - offline_a) / 2
+
     prob_ratio_z = z_signals.ravel() / mean_z
 
     ratios = prob_ratio_x[:, np.newaxis] / prob_ratio_z
@@ -151,50 +206,64 @@ def run_loss(target_signals: np.ndarray) -> np.ndarray:
     mia_scores = -target_signals
     return mia_scores
 
+def run_population_attack(
+    target_signals: np.ndarray,
+    population_signals: np.ndarray,
+) -> np.ndarray:
+    """
+    Population attack: score = empirical CDF of the target signal within the population distribution.
+
+    For each sample, computes the fraction of population samples whose confidence is
+    lower than or equal to the sample's confidence. Higher confidence than most of the
+    population -> higher score -> more likely to be a member.
+
+    Args:
+        target_signals (np.ndarray): Softmax probabilities from the target model. Shape: (n_samples,)
+        population_signals (np.ndarray): Softmax probabilities from the target model on population data. Shape: (n_pop,)
+
+    Returns:
+        np.ndarray: Scores in [0, 1]. Higher = more likely member. Shape: (n_samples,)
+    """
+    pop_sorted = np.sort(population_signals.ravel())
+    scores = np.searchsorted(pop_sorted, target_signals.ravel(), side="right") / len(pop_sorted)
+    return scores
+
+
 def run_lira(
     target_signals: np.ndarray,
     shadow_model_signals: np.ndarray,
     shadow_model_memberships: np.ndarray,
     target_memberships: np.ndarray,
+    online: bool = False,
 ) -> np.ndarray:
     """
     Attack a target model using the LiRA (Likelihood-Ratio Attack) method.
-    
-    Aligned with PrivacyGuard's offline LiRA implementation.
-    
-    For each sample x, we:
-    1. Compute predictions from shadow models where sample was NOT in training (OUT)
-    2. Estimate per-sample μ_out (mean of OUT predictions)
-    3. Estimate global σ_out (mean of per-sample standard deviations)
-    4. Compute: score = log P(conf_obs | N(μ_out, σ²_out_global))
-    5. Negate for offline variant on hold-out test set
-    
-    The intuition: Members typically have predictions that fit better under the 
-    "non-member" (OUT) distribution than population data.
+
+    Offline: score = -log P(conf | N(μ_out, σ_out))
+             Only OUT shadow models are used. Score is negated so that
+             higher = more likely to be a member.
+
+    Online:  score = log P(conf | N(μ_in, σ_in)) - log P(conf | N(μ_out, σ_out))
+             Both IN and OUT shadow models are used. No negation needed.
 
     Args:
-        target_signals (np.ndarray): Softmax signals from target model.
-                                     Shape: (num_samples,)
+        target_signals (np.ndarray): Softmax signals from target model. Shape: (num_samples,)
         shadow_model_signals (np.ndarray): Softmax signals from shadow models.
                                            Shape: (num_samples, num_shadow_models)
         shadow_model_memberships (np.ndarray): Membership matrix for shadow models.
                                                Shape: (num_samples, num_shadow_models)
-                                               Each entry [i,j] = 1 if sample i was in shadow model j's training
-        target_memberships (np.ndarray): Membership array for target model (1=in, 0=out).
-                                         Shape: (num_samples,)
-       
+        target_memberships (np.ndarray): Membership array for target model. Shape: (num_samples,)
+        online (bool): If True, run the online variant using both IN and OUT shadow models.
+
     Returns:
-        np.ndarray: LiRA scores for all samples.
-                   For offline LiRA: -log P(conf_obs | N(μ_out, σ²_out_global))
-                   Higher value = more likely to be a member
-                   Shape: (num_samples,)
+        np.ndarray: LiRA scores. Higher value = more likely to be a member. Shape: (num_samples,)
     """
     from scipy.stats import norm
-    
+
     target_signals = target_signals.ravel().copy()
     target_memberships = target_memberships.ravel()
 
-    # Replace NaN/Inf in signals (can occur with TabICL on large datasets)
+    # Replace NaN/Inf in signals
     finite_mask = np.isfinite(target_signals)
     if not finite_mask.all():
         fill = np.nanmedian(target_signals) if finite_mask.any() else 0.0
@@ -209,43 +278,48 @@ def run_lira(
             shadow_model_signals[bad, j] = col_medians[j] if np.isfinite(col_medians[j]) else 0.0
 
     n_samples = len(target_signals)
-    
-    # For each sample, compute μ of OUT predictions (per-sample)
-    # OUT predictions = predictions from shadow models where sample was NOT in training
+
     score_mean_out = np.zeros(n_samples)
     score_std_out = np.zeros(n_samples)
-    
-    # shadow_model_memberships[i, j] = 1 if sample i was in shadow model j's training
-    
+    score_mean_in = np.zeros(n_samples)
+    score_std_in = np.zeros(n_samples)
+
     for i in range(n_samples):
-        sample_shadow_preds = shadow_model_signals[i, :]  # Predictions from all shadows
-        sample_memberships = shadow_model_memberships[i, :]  # Which shadows included this sample
-        
-        # OUT predictions: from shadows where sample was NOT included
-        out_mask = ~sample_memberships.astype(bool)
-        out_preds = sample_shadow_preds[out_mask]
-        
+        sample_preds = shadow_model_signals[i, :]
+        in_mask = shadow_model_memberships[i, :].astype(bool)
+        out_mask = ~in_mask
+
+        out_preds = sample_preds[out_mask]
         if len(out_preds) > 0:
             score_mean_out[i] = np.mean(out_preds)
             score_std_out[i] = np.std(out_preds)
         else:
-            # No OUT predictions available, use overall mean and small std
-            score_mean_out[i] = np.mean(sample_shadow_preds)
+            score_mean_out[i] = np.mean(sample_preds)
             score_std_out[i] = 1e-8
-    
-    # Compute global standard deviation (mean of all per-sample stds)
-    global_std_out = np.mean(score_std_out)
-    global_std_out = np.maximum(global_std_out, 1e-8)
-    
-    # For offline LiRA: compute log-likelihood under OUT distribution
-    # log P(conf_obs | N(μ_out_sample, σ²_out_global))
-    lira_scores = norm.logpdf(target_signals, score_mean_out, global_std_out)
-    
-    # Negate scores for offline LiRA on hold-out test set
-    # (Aligns with PrivacyGuard: if not online_attack, negate the scores)
-    # Higher negated score = more likely to be a member
-    lira_scores = -lira_scores
-    
+
+        if online:
+            in_preds = sample_preds[in_mask]
+            if len(in_preds) > 0:
+                score_mean_in[i] = np.mean(in_preds)
+                score_std_in[i] = np.std(in_preds)
+            else:
+                score_mean_in[i] = np.mean(sample_preds)
+                score_std_in[i] = 1e-8
+
+    # Global std: mean of per-sample stds (more stable than per-sample variance)
+    global_std_out = np.maximum(np.mean(score_std_out), 1e-8)
+
+    if online:
+        global_std_in = np.maximum(np.mean(score_std_in), 1e-8)
+        lira_scores = (
+            norm.logpdf(target_signals, score_mean_in, global_std_in)
+            - norm.logpdf(target_signals, score_mean_out, global_std_out)
+        )
+    else:
+        lira_scores = norm.logpdf(target_signals, score_mean_out, global_std_out)
+        # Negate: lower log-likelihood under OUT → more likely to be a member
+        lira_scores = -lira_scores
+
     return lira_scores
 
 
