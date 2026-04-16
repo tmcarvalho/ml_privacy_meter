@@ -11,7 +11,7 @@ import torch.utils.data
 from sklearn.metrics import roc_curve, auc
 from torch.utils.data import Subset
 
-from attacks import tune_offline_a, run_rmia, run_loss, run_lira, get_shadow_model_signals
+from attacks import tune_offline_a, run_rmia, run_loss, run_lira, run_population_attack, get_shadow_model_signals
 from modules.ramia.ramia_scores import get_topk, get_bottomk, trim_mia_scores
 from visualize import (
     plot_roc,
@@ -258,24 +258,42 @@ def audit_models(
     for target_model_idx in target_model_indices:
         baseline_time = time.time()
         if configs["audit"]["algorithm"] == "RMIA":
-            offline_a = tune_offline_a(
-                target_model_idx,
-                all_signals,
-                population_signals,
-                all_memberships,
-                logger,
-            )[0]
-            logger.info(f"The best offline_a is %0.1f", offline_a)
-            mia_scores = run_rmia(
-                target_model_idx,
-                all_signals,
-                population_signals,
-                all_memberships,
-                num_reference_models,
-                offline_a,
-            )
+            online_attack = configs["audit"].get("online_attack", False)
+            if online_attack:
+                logger.info(
+                    "Running RMIA (online) on target model %d", target_model_idx
+                )
+                mia_scores = run_rmia(
+                    target_model_idx,
+                    all_signals,
+                    population_signals,
+                    all_memberships,
+                    num_reference_models,
+                    online=True,
+                )
+            else:
+                offline_a = tune_offline_a(
+                    target_model_idx,
+                    all_signals,
+                    population_signals,
+                    all_memberships,
+                    logger,
+                )[0]
+                logger.info(
+                    "Running RMIA (offline) on target model %d with offline_a=%.1f",
+                    target_model_idx,
+                    offline_a,
+                )
+                mia_scores = run_rmia(
+                    target_model_idx,
+                    all_signals,
+                    population_signals,
+                    all_memberships,
+                    num_reference_models,
+                    offline_a,
+                )
         elif configs["audit"]["algorithm"] == "LIRA":
-            # LiRA uses shadow models to compute likelihood under OUT distribution
+            online_attack = configs["audit"].get("online_attack", False)
             shadow_signals, shadow_memberships = get_shadow_model_signals(
                 all_signals,
                 all_memberships,
@@ -288,10 +306,17 @@ def audit_models(
                 shadow_signals,
                 shadow_memberships,
                 target_memberships,
+                online=online_attack,
             )
-            logger.info(f"LiRA attack completed for model {target_model_idx}")
+            variant = "online" if online_attack else "offline"
+            logger.info(f"LiRA ({variant}) attack completed for model {target_model_idx}")
         elif configs["audit"]["algorithm"] == "LOSS":
             mia_scores = run_loss(all_signals[:, target_model_idx])
+        elif configs["audit"]["algorithm"] == "POPULATION":
+            mia_scores = run_population_attack(
+                all_signals[:, target_model_idx],
+                population_signals[:, target_model_idx],
+            )
         else:
             raise NotImplementedError(
                 f"{configs['audit']['algorithm']} is not implemented"
@@ -363,22 +388,52 @@ def audit_models_range(
         baseline_time = time.time()
 
         if configs["audit"]["algorithm"] == "RMIA":
-            offline_a, ref_mia_scores, ref_membership = tune_offline_a(
-                target_model_idx,
-                all_signals,
-                population_signals,
-                all_memberships,
-                logger,
-            )
-            logger.info(f"The best offline_a is %0.1f", offline_a)
-            mia_scores = run_rmia(
-                target_model_idx,
-                all_signals,
-                population_signals,
-                all_memberships,
-                num_reference_models,
-                offline_a,
-            )
+            online_attack = configs["audit"].get("online_attack", False)
+            if online_attack:
+                paired_model_idx = (
+                    target_model_idx + 1 if target_model_idx % 2 == 0 else target_model_idx - 1
+                )
+                ref_mia_scores = run_rmia(
+                    paired_model_idx,
+                    all_signals,
+                    population_signals,
+                    all_memberships,
+                    1,
+                    online=True,
+                )
+                ref_membership = all_memberships[:, paired_model_idx]
+                logger.info(
+                    "Running RMIA (online) on target model %d", target_model_idx
+                )
+                mia_scores = run_rmia(
+                    target_model_idx,
+                    all_signals,
+                    population_signals,
+                    all_memberships,
+                    num_reference_models,
+                    online=True,
+                )
+            else:
+                offline_a, ref_mia_scores, ref_membership = tune_offline_a(
+                    target_model_idx,
+                    all_signals,
+                    population_signals,
+                    all_memberships,
+                    logger,
+                )
+                logger.info(
+                    "Running RMIA (offline) on target model %d with offline_a=%.1f",
+                    target_model_idx,
+                    offline_a,
+                )
+                mia_scores = run_rmia(
+                    target_model_idx,
+                    all_signals,
+                    population_signals,
+                    all_memberships,
+                    num_reference_models,
+                    offline_a,
+                )
         else:
             raise NotImplementedError(
                 f"{configs['audit']['algorithm']} is not implemented for RaMIA"
