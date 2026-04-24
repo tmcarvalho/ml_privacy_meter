@@ -176,6 +176,10 @@ def load_existing_model(
             return model
         else:
             # Non pytorch modes: LightGBM / TabPFN / sklearn model
+            # Reset cached faiss index — pickled index may use a different SIMD
+            # variant (e.g. avx512 vs avx2) that has an incompatible Python binding.
+            if hasattr(model_weight, "faiss_knn"):
+                model_weight.faiss_knn = None
             return model_weight
     elif model_checkpoint_extension == ".pt" or model_checkpoint_extension == ".pth":
         return model.load_state_dict(torch.load(model_path))
