@@ -41,6 +41,16 @@ def compute_attack_results(mia_scores, target_memberships):
     one_tenth_fpr = tpr_list[np.where(fpr_list <= 0.001)[0][-1]]
     zero_fpr = tpr_list[np.where(fpr_list <= 0.0)[0][-1]]
 
+    # TNR@lowFNR: symmetric to TPR@lowFPR
+    # FNR = 1 - TPR, TNR = 1 - FPR
+    # Find the first ROC point where TPR >= (1 - fnr_threshold), giving the lowest FPR (= highest TNR)
+    idx_one_fnr = np.where(tpr_list >= (1 - 0.01))[0]
+    one_fnr = float(1 - fpr_list[idx_one_fnr[0]]) if len(idx_one_fnr) > 0 else 0.0
+    idx_one_tenth_fnr = np.where(tpr_list >= (1 - 0.001))[0]
+    one_tenth_fnr = float(1 - fpr_list[idx_one_tenth_fnr[0]]) if len(idx_one_tenth_fnr) > 0 else 0.0
+    idx_zero_fnr = np.where(tpr_list >= 1.0)[0]
+    zero_fnr = float(1 - fpr_list[idx_zero_fnr[0]]) if len(idx_zero_fnr) > 0 else 0.0
+
     return {
         "fpr": fpr_list,
         "tpr": tpr_list,
@@ -48,6 +58,9 @@ def compute_attack_results(mia_scores, target_memberships):
         "one_fpr": one_fpr,
         "one_tenth_fpr": one_tenth_fpr,
         "zero_fpr": zero_fpr,
+        "one_fnr": one_fnr,
+        "one_tenth_fnr": one_tenth_fnr,
+        "zero_fnr": zero_fnr,
     }
 
 
@@ -68,11 +81,13 @@ def get_audit_results(report_dir, model_idx, mia_scores, target_memberships, log
     attack_result = compute_attack_results(mia_scores, target_memberships)
     Path(report_dir).mkdir(parents=True, exist_ok=True)
     logger.info(
-        "Target Model %d: AUC %.4f, TPR@0.1%%FPR of %.4f, TPR@0.0%%FPR of %.4f",
+        "Target Model %d: AUC %.4f, TPR@0.1%%FPR of %.4f, TPR@0.0%%FPR of %.4f, TNR@0.1%%FNR of %.4f, TNR@0.0%%FNR of %.4f",
         model_idx,
         attack_result["auc"],
         attack_result["one_tenth_fpr"],
         attack_result["zero_fpr"],
+        attack_result["one_tenth_fnr"],
+        attack_result["zero_fnr"],
     )
 
     plot_roc(
@@ -132,6 +147,8 @@ def get_audit_results(report_dir, model_idx, mia_scores, target_memberships, log
         auc=attack_result["auc"],
         one_tenth_fpr=attack_result["one_tenth_fpr"],
         zero_fpr=attack_result["zero_fpr"],
+        one_tenth_fnr=attack_result["one_tenth_fnr"],
+        zero_fnr=attack_result["zero_fnr"],
         scores=mia_scores.ravel(),
         memberships=target_memberships.ravel(),
     )
@@ -155,10 +172,12 @@ def get_average_audit_results(report_dir, mia_score_list, membership_list, logge
     attack_result = compute_attack_results(mia_scores, target_memberships)
     Path(report_dir).mkdir(parents=True, exist_ok=True)
     logger.info(
-        "Average result: AUC %.4f, TPR@0.1%%FPR of %.4f, TPR@0.0%%FPR of %.4f",
+        "Average result: AUC %.4f, TPR@0.1%%FPR of %.4f, TPR@0.0%%FPR of %.4f, TNR@0.1%%FNR of %.4f, TNR@0.0%%FNR of %.4f",
         attack_result["auc"],
         attack_result["one_tenth_fpr"],
         attack_result["zero_fpr"],
+        attack_result["one_tenth_fnr"],
+        attack_result["zero_fnr"],
     )
 
     plot_roc(
@@ -218,6 +237,8 @@ def get_average_audit_results(report_dir, mia_score_list, membership_list, logge
         auc=attack_result["auc"],
         one_tenth_fpr=attack_result["one_tenth_fpr"],
         zero_fpr=attack_result["zero_fpr"],
+        one_tenth_fnr=attack_result["one_tenth_fnr"],
+        zero_fnr=attack_result["zero_fnr"],
         scores=mia_scores.ravel(),
         memberships=target_memberships.ravel(),
     )
