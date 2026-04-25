@@ -277,7 +277,7 @@ def train_nontorch_models(
             reg_alpha=configs.get("reg_alpha", 0.0),
             reg_lambda=configs.get("reg_lambda", 0.0),
             random_state=configs.get("random_state", 42),
-            n_jobs=-1,
+            n_jobs=configs.get("n_jobs", -1),
             verbose=-1,
         )
 
@@ -289,7 +289,7 @@ def train_nontorch_models(
             min_samples_leaf=configs.get("min_samples_leaf", 1),
             max_features=configs.get("max_features", "sqrt"),
             random_state=configs.get("random_state", 42),
-            n_jobs=-1,
+            n_jobs=configs.get("n_jobs", 1),
         )
 
     if configs["model_name"] in foundation_models:
