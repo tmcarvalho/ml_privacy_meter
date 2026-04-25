@@ -322,7 +322,8 @@ def dp_load_models(log_dir, dataset, num_models, configs, logger):
     return model_list, all_memberships
 
 
-def train_models(log_dir, dataset, data_split_info, all_memberships, configs, logger):
+def train_models(log_dir, dataset, data_split_info, all_memberships, configs, logger,
+                 on_model_trained=None):
     """
     Train models based on the dataset split information.
 
@@ -333,16 +334,20 @@ def train_models(log_dir, dataset, data_split_info, all_memberships, configs, lo
         all_memberships (np.array): Membership matrix indicating which samples were used in training each model.
         configs (dict): Configuration dictionary containing training settings.
         logger (logging.Logger): Logger object for logging the training process.
+        on_model_trained (callable, optional): Called with (model, model_idx) immediately after each
+            model is trained and saved. When provided, models are not accumulated in the returned list
+            (caller owns them via the callback) so peak RAM is reduced.
 
     Returns:
-        model_list (list of nn.Module): List of trained model objects.
+        model_list (list of nn.Module): List of trained model objects (empty if on_model_trained given).
     """
     experiment_dir = f"{log_dir}/models"
     Path(experiment_dir).mkdir(parents=True, exist_ok=True)
     logger.info(f"Training {len(data_split_info)} models")
 
     model_list = prepare_models(
-        experiment_dir, dataset, data_split_info, all_memberships, configs, logger
+        experiment_dir, dataset, data_split_info, all_memberships, configs, logger,
+        on_model_trained=on_model_trained,
     )
     return model_list
 
@@ -426,6 +431,7 @@ def prepare_models(
     all_memberships: np.array,
     configs: dict,
     logger,
+    on_model_trained=None,
 ):
     """
     Train models based on the dataset split information and save their metadata.
@@ -441,15 +447,38 @@ def prepare_models(
     Returns:
         list: List of trained model objects.
     """
-    np.save(f"{log_dir}/memberships.npy", all_memberships)
+    # Load partial metadata from a previous (possibly crashed) run so we can
+    # resume from the last completed model instead of retraining from scratch.
+    metadata_path = f"{log_dir}/models_metadata.json"
+    if os.path.exists(metadata_path):
+        with open(metadata_path) as _f:
+            _existing = json.load(_f)
+        model_metadata_dict = {int(k): v for k, v in _existing.items()}
+        logger.info("Resuming: found %d already-trained models in metadata.", len(model_metadata_dict))
+    else:
+        model_metadata_dict = {}
+        np.save(f"{log_dir}/memberships.npy", all_memberships)
 
-    model_metadata_dict = {}
     model_list = []
     new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add other models here!
 
     # for split, split_info in enumerate(data_split_info):
     for split in range(len(data_split_info)):
         split_info = data_split_info[split]
+
+        # Resume: if this model was already trained in a previous (possibly crashed) run,
+        # reload it from disk and pass it to the callback instead of retraining.
+        if split in model_metadata_dict:
+            logger.info("Resuming: reloading already-trained model %d from disk.", split)
+            _device = configs.get("audit", {}).get("device", "cpu")
+            _device = f"cuda:{_device}" if isinstance(_device, int) else str(_device)
+            model_copy = load_existing_model(model_metadata_dict[split], dataset, _device, configs)
+            if on_model_trained is not None:
+                on_model_trained(model_copy, split)
+            else:
+                model_list.append(model_copy)
+            continue
+
         baseline_time = time.time()
         process = psutil.Process(os.getpid())
         cpu_mem_start = process.memory_info().rss
@@ -568,7 +597,6 @@ def prepare_models(
                 model_copy.to('cpu')
             except Exception:
                 pass
-        model_list.append(model_copy)
         # Also release the original model's GPU memory before the next iteration.
         if hasattr(model, 'to'):
             try:
@@ -639,6 +667,12 @@ def prepare_models(
         # Write after each model so a crashed run can be resumed by hybrid mode.
         with open(f"{log_dir}/models_metadata.json", "w") as f:
             json.dump(model_metadata_dict, f, indent=4)
+
+        if on_model_trained is not None:
+            on_model_trained(model_copy, model_idx)
+            # Don't accumulate in model_list — caller owns the model via the callback.
+        else:
+            model_list.append(model_copy)
 
     return model_list
 
