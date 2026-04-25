@@ -356,3 +356,35 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
     np.save(signal_path, signals)
     logger.info("Signals saved to disk.")
     return signals
+
+
+def compute_signal_one_model(model, dataset, configs, logger, is_population=False):
+    """Compute signals for a single model without caching. Returns (n_samples, k) array."""
+    new_models = {"lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"}
+    gpu_models = {"tabdpt", "tabnet", "tarte", "tabpfn", "real-tabpfn", "tabicl"}
+    model_name = configs["train"]["model_name"]
+    is_new_model = model_name.lower() in new_models
+    is_gpu_model = model_name.lower() in gpu_models
+
+    batch_size = configs["audit"]["batch_size"]
+    if model_name in ("tabicl", "tabdpt"):
+        max_batch = max(1, 50_000_000 // max(len(dataset), 1))
+        batch_size = min(batch_size, max_batch)
+    _raw_device = configs["audit"]["device"]
+    device = f"cuda:{_raw_device}" if isinstance(_raw_device, int) else str(_raw_device)
+    infer_device = f"cuda:{device}" if str(device).isdigit() else device
+
+    dataset_samples = np.arange(len(dataset))
+    data, targets = load_dataset_subsets(dataset, dataset_samples, model_name, batch_size, device)
+
+    if is_new_model:
+        if is_gpu_model and hasattr(model, "to"):
+            model.to(infer_device)
+        sig = get_probs_nontorch_models(model, logger, data, targets, batch_size)
+        if is_gpu_model and hasattr(model, "to"):
+            model.to("cpu")
+            import torch as _torch
+            _torch.cuda.empty_cache()
+    else:
+        sig = get_softmax(model, data, targets, batch_size, device)
+    return sig
