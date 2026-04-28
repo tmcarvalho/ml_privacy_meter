@@ -239,12 +239,11 @@ def run_lira(
     """
     Attack a target model using the LiRA (Likelihood-Ratio Attack) method.
 
-    Offline: score = -log P(conf | N(μ_out, σ_out))
-             Only OUT shadow models are used. Score is negated so that
-             higher = more likely to be a member.
+    Offline: Λ = Pr[Z ≤ φ(f(x))] where Z ~ N(μ_out, σ_out)
+                     One-sided CDF test — only OUT shadow models needed.
 
-    Online:  score = log P(conf | N(μ_in, σ_in)) - log P(conf | N(μ_out, σ_out))
-             Both IN and OUT shadow models are used. No negation needed.
+    Online: Λ = log N(φ(f(x)); μ_in, σ_in) − log N(φ(f(x)); μ_out, σ_out)
+                      Log likelihood ratio — both IN and OUT shadow models used.
 
     Args:
         target_signals (np.ndarray): Softmax signals from target model. Shape: (num_samples,)
@@ -260,13 +259,17 @@ def run_lira(
     """
     from scipy.stats import norm
 
+    def _safe_logit(x, eps=1e-8):
+        x = np.clip(x, eps, 1 - eps)
+        return np.log(x / (1 - x))
+
     target_signals = target_signals.ravel().copy()
     target_memberships = target_memberships.ravel()
 
-    # Replace NaN/Inf in signals
+    # Replace NaN/Inf in signals before logit transform
     finite_mask = np.isfinite(target_signals)
     if not finite_mask.all():
-        fill = np.nanmedian(target_signals) if finite_mask.any() else 0.0
+        fill = np.nanmedian(target_signals) if finite_mask.any() else 0.5
         target_signals[~finite_mask] = fill
 
     shadow_model_signals = shadow_model_signals.copy()
@@ -275,50 +278,54 @@ def run_lira(
         col_medians = np.nanmedian(shadow_model_signals, axis=0)
         for j in range(shadow_model_signals.shape[1]):
             bad = ~shadow_finite[:, j]
-            shadow_model_signals[bad, j] = col_medians[j] if np.isfinite(col_medians[j]) else 0.0
+            shadow_model_signals[bad, j] = col_medians[j] if np.isfinite(col_medians[j]) else 0.5
 
-    n_samples = len(target_signals)
+    # Apply logit transform — confidence is bounded in [0,1]; Gaussian fits better in logit space
+    target_logits = _safe_logit(target_signals)
+    shadow_logits = _safe_logit(shadow_model_signals)
+
+    n_samples = len(target_logits)
 
     score_mean_out = np.zeros(n_samples)
-    score_std_out = np.zeros(n_samples)
+    score_std_out = np.full(n_samples, 1e-8)
     score_mean_in = np.zeros(n_samples)
-    score_std_in = np.zeros(n_samples)
+    score_std_in = np.full(n_samples, 1e-8)
 
     for i in range(n_samples):
-        sample_preds = shadow_model_signals[i, :]
+        sample_logits = shadow_logits[i, :]
         in_mask = shadow_model_memberships[i, :].astype(bool)
         out_mask = ~in_mask
 
-        out_preds = sample_preds[out_mask]
-        if len(out_preds) > 0:
-            score_mean_out[i] = np.mean(out_preds)
-            score_std_out[i] = np.std(out_preds)
+        out_logits = sample_logits[out_mask]
+        if len(out_logits) >= 2:
+            score_mean_out[i] = np.mean(out_logits)
+            score_std_out[i] = np.std(out_logits)
+        elif len(out_logits) == 1:
+            score_mean_out[i] = out_logits[0]
         else:
-            score_mean_out[i] = np.mean(sample_preds)
-            score_std_out[i] = 1e-8
+            score_mean_out[i] = np.mean(sample_logits)
 
         if online:
-            in_preds = sample_preds[in_mask]
-            if len(in_preds) > 0:
-                score_mean_in[i] = np.mean(in_preds)
-                score_std_in[i] = np.std(in_preds)
+            in_logits = sample_logits[in_mask]
+            if len(in_logits) >= 2:
+                score_mean_in[i] = np.mean(in_logits)
+                score_std_in[i] = np.std(in_logits)
+            elif len(in_logits) == 1:
+                score_mean_in[i] = in_logits[0]
             else:
-                score_mean_in[i] = np.mean(sample_preds)
-                score_std_in[i] = 1e-8
+                score_mean_in[i] = np.mean(sample_logits)
 
-    # Global std: mean of per-sample stds (more stable than per-sample variance)
-    global_std_out = np.maximum(np.mean(score_std_out), 1e-8)
+    # Use per-sample std (clipped to avoid division by zero)
+    score_std_out = np.maximum(score_std_out, 1e-8)
 
     if online:
-        global_std_in = np.maximum(np.mean(score_std_in), 1e-8)
+        score_std_in = np.maximum(score_std_in, 1e-8)
         lira_scores = (
-            norm.logpdf(target_signals, score_mean_in, global_std_in)
-            - norm.logpdf(target_signals, score_mean_out, global_std_out)
+            norm.logpdf(target_logits, score_mean_in, score_std_in)
+            - norm.logpdf(target_logits, score_mean_out, score_std_out)
         )
     else:
-        lira_scores = norm.logpdf(target_signals, score_mean_out, global_std_out)
-        # Negate: lower log-likelihood under OUT → more likely to be a member
-        lira_scores = -lira_scores
+        lira_scores = norm.cdf(target_logits, score_mean_out, score_std_out)
 
     return lira_scores
 
