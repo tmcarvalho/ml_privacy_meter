@@ -168,19 +168,11 @@ def run_rmia(
 
     prob_ratio_x = target_signals.ravel() / mean_x
 
-    # Population samples are always OUT for all reference models
     z_signals = population_signals[:, target_model_idx]
-    population_memberships = np.zeros_like(population_signals).astype(bool)
-    z_out_signals = get_rmia_out_signals(
-        population_signals,
-        population_memberships,
-        target_model_idx,
-        num_reference_models,
-    )
-    mean_out_z = np.mean(z_out_signals, axis=1)
+    z_columns = _get_reference_columns(population_signals, target_model_idx, num_reference_models)
+    mean_out_z = np.mean(population_signals[:, z_columns[:num_reference_models]], axis=1)
 
     if online:
-        # Population is never IN, so P(z) = P_out(z)
         mean_z = mean_out_z
     else:
         mean_z = (1 + offline_a) / 2 * mean_out_z + (1 - offline_a) / 2
@@ -259,8 +251,9 @@ def run_lira(
     """
     from scipy.stats import norm
 
-    def _safe_logit(x, eps=1e-8):
-        x = np.clip(x, eps, 1 - eps)
+    def _safe_logit(x, eps=1e-7):
+        # Cast to float64 first: float32(1.0) cannot be clipped to 1-1e-8 (not representable in float32)
+        x = np.clip(np.asarray(x, dtype=np.float64), eps, 1 - eps)
         return np.log(x / (1 - x))
 
     target_signals = target_signals.ravel().copy()
