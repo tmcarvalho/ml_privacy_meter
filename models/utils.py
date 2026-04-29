@@ -457,7 +457,7 @@ def prepare_models(
         logger.info("Resuming: found %d already-trained models in metadata.", len(model_metadata_dict))
     else:
         model_metadata_dict = {}
-        np.save(f"{log_dir}/memberships.npy", all_memberships)
+    np.save(f"{log_dir}/memberships.npy", all_memberships)
 
     model_list = []
     new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add other models here!
