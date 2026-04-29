@@ -1,6 +1,7 @@
 """This module defines functions for model handling, including model definition, loading, and training."""
 
 import copy
+import gc
 import json
 import logging
 import GPUtil
@@ -477,6 +478,8 @@ def prepare_models(
                 on_model_trained(model_copy, split)
             else:
                 model_list.append(model_copy)
+            del model_copy
+            gc.collect()
             continue
 
         baseline_time = time.time()
@@ -671,6 +674,8 @@ def prepare_models(
         if on_model_trained is not None:
             on_model_trained(model_copy, model_idx)
             # Don't accumulate in model_list — caller owns the model via the callback.
+            del model_copy
+            gc.collect()
         else:
             model_list.append(model_copy)
 
