@@ -241,7 +241,7 @@ def train_nontorch_models(
     test_loader: torch.utils.data.DataLoader = None,
 ):
     """
-    Train a model using the provided training data, supporting LightGBM and tabular foundation models.
+    Supports ensembling, boosting and tabular foundation models.
 
     Args:
         model: Model object to train (e.g., LGBMClassifier)
@@ -250,7 +250,7 @@ def train_nontorch_models(
         test_loader: Optional PyTorch DataLoader for testing / validation
 
     Returns:
-        Trained model (LightGBM or other compatible models)
+        Trained model
     """
 
     # Convert DataLoader to NumPy

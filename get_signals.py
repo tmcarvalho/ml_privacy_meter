@@ -128,7 +128,7 @@ def get_probs_nontorch_models(
         elif hasattr(model, "decision_function"):
             logits = model.decision_function(x_batch)
 
-            # Binary sklearn case → convert to 2-class logits
+            # Binary sklearn case: convert to 2-class logits
             if logits.ndim == 1:
                 logits = np.stack([-logits, logits], axis=1)
             model_exposing = "decision_function"
