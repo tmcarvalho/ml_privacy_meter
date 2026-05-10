@@ -292,6 +292,7 @@ def train_nontorch_models(
             n_jobs=configs.get("n_jobs", 1),
         )
 
+    _old_sdpa = None
     if configs["model_name"] in foundation_models:
         import torch.nn.functional as F
 
@@ -304,44 +305,49 @@ def train_nontorch_models(
 
         F.scaled_dot_product_attention = sdpa_ignore_gqa
 
-    if configs["model_name"] == "tabnet":
-        n_train = len(X_train)
-        batch_size = min(configs.get("batch_size", 256), n_train)
-        virtual_batch_size = min(configs.get("virtual_batch_size", 64), batch_size)
-        tabnet_params = dict(
-            n_d=configs.get("n_d", 32),
-            n_a=configs.get("n_d", 32),  # keep n_a == n_d
-            n_steps=configs.get("n_steps", 3),
-            gamma=configs.get("gamma", 1.3),
-            seed=configs.get("random_state", 42),
-        )
-        if configs.get("tabnet_lr") is not None:
-            tabnet_params["optimizer_params"] = {"lr": configs["tabnet_lr"]}
-        model.set_params(**tabnet_params)
-        model.fit(
-            X_train, y_train,
-            batch_size=batch_size,
-            virtual_batch_size=virtual_batch_size,
-            patience=configs.get("patience", 15),
-            max_epochs=configs.get("max_epochs", 200),
-        )
-    else:
-        model.fit(X_train, y_train)
-    
-    #TODO: add other models here
-    y_pred = model.predict(X_train)
-    train_acc = accuracy_score(y_train, y_pred)
-    
-    train_loss = None
-    if hasattr(model, "predict_proba"): #loss requires probabilities
-        train_loss = _log_loss_with_labels(model, y_train, model.predict_proba(X_train))
+    try:
+        if configs["model_name"] == "tabnet":
+            n_train = len(X_train)
+            batch_size = min(configs.get("batch_size", 256), n_train)
+            virtual_batch_size = min(configs.get("virtual_batch_size", 64), batch_size)
+            tabnet_params = dict(
+                n_d=configs.get("n_d", 32),
+                n_a=configs.get("n_d", 32),  # keep n_a == n_d
+                n_steps=configs.get("n_steps", 3),
+                gamma=configs.get("gamma", 1.3),
+                seed=configs.get("random_state", 42),
+            )
+            if configs.get("tabnet_lr") is not None:
+                tabnet_params["optimizer_params"] = {"lr": configs["tabnet_lr"]}
+            model.set_params(**tabnet_params)
+            model.fit(
+                X_train, y_train,
+                batch_size=batch_size,
+                virtual_batch_size=virtual_batch_size,
+                patience=configs.get("patience", 15),
+                max_epochs=configs.get("max_epochs", 200),
+            )
+        else:
+            model.fit(X_train, y_train)
 
-    print(f"Train Loss: {train_loss:.4f}" if train_loss else "")
-    print(f"Train Acc: {train_acc:.4f}")
+        #TODO: add other models here
+        y_pred = model.predict(X_train)
+        train_acc = accuracy_score(y_train, y_pred)
 
-    if test_loader:
-        test_loss, test_acc = inference_nontorch_models(model, test_loader)
-        print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f}")
+        train_loss = None
+        if hasattr(model, "predict_proba"): #loss requires probabilities
+            train_loss = _log_loss_with_labels(model, y_train, model.predict_proba(X_train))
+
+        print(f"Train Loss: {train_loss:.4f}" if train_loss else "")
+        print(f"Train Acc: {train_acc:.4f}")
+
+        if test_loader:
+            test_loss, test_acc = inference_nontorch_models(model, test_loader)
+            print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f}")
+    finally:
+        if _old_sdpa is not None:
+            import torch.nn.functional as F
+            F.scaled_dot_product_attention = _old_sdpa
 
     # # Move the model back to CPU if needed (this is optional)
     # model = move_model_to_device(model)
