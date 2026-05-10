@@ -98,12 +98,12 @@ def get_model(model_type: str, dataset_name: str, configs: dict, device: str = N
         return LGBMClassifier()
     if model_type == "rf":
         return RandomForestClassifier()
-    if model_type == "tabpfn":
-        return TabPFNClassifier()
-    if model_type == "real-tabpfn":
-        return TabPFNClassifier(model_path=REAL_TABPFN_MODEL_PATH)
     _raw = device or configs.get("train", {}).get("device", "cuda:0")
     _device = f"cuda:{_raw}" if isinstance(_raw, int) else _raw
+    if model_type == "tabpfn":
+        return TabPFNClassifier(device=_device)
+    if model_type == "real-tabpfn":
+        return TabPFNClassifier(model_path=REAL_TABPFN_MODEL_PATH, device=_device)
     if model_type == "tabicl":
         return TabICLClassifier(device=_device)
     if model_type == "tabdpt":
@@ -181,6 +181,17 @@ def load_existing_model(
             # variant (e.g. avx512 vs avx2) that has an incompatible Python binding.
             if hasattr(model_weight, "faiss_knn"):
                 model_weight.faiss_knn = None
+            # For TabPFN: the unpickled executor_ holds tensors on the device
+            # they were saved with (typically CPU). estimator_to_device moves
+            # both the attribute flags AND the inference engine to the new device.
+            if device is not None and hasattr(model_weight, "executor_"):
+                try:
+                    from tabpfn.base import estimator_to_device
+                    estimator_to_device(model_weight, device)
+                except Exception:
+                    pass
+            elif device is not None and hasattr(model_weight, "device"):
+                model_weight.device = device
             return model_weight
     elif model_checkpoint_extension == ".pt" or model_checkpoint_extension == ".pth":
         return model.load_state_dict(torch.load(model_path))
