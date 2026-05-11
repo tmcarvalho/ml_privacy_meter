@@ -391,7 +391,7 @@ def dp_train_models(
     return model_list
 
 
-def split_dataset_for_training(dataset_size, num_model_pairs, labels=None):
+def split_dataset_for_training(dataset_size, num_model_pairs, labels=None, random_seed=None):
     """
     Split dataset into training and test partitions for model pairs.
 
@@ -401,6 +401,7 @@ def split_dataset_for_training(dataset_size, num_model_pairs, labels=None):
         labels (array-like, optional): Class labels for stratified splitting. When provided,
             each half is guaranteed to contain all classes present in the dataset, preventing
             log_loss failures on imbalanced datasets.
+        random_seed (int, optional): Base seed for reproducible, seed-varying pair splits.
 
     Returns:
         data_split (list): List of dictionaries containing training and test split indices for each model.
@@ -411,6 +412,7 @@ def split_dataset_for_training(dataset_size, num_model_pairs, labels=None):
     data_splits = []
     indices = np.arange(dataset_size)
     split_index = len(indices) // 2
+    rng = np.random.default_rng(random_seed) if random_seed is not None else None
     master_keep = np.full((2 * num_model_pairs, dataset_size), True, dtype=bool)
 
     # Stratification requires every class to have at least 2 members.
@@ -419,12 +421,17 @@ def split_dataset_for_training(dataset_size, num_model_pairs, labels=None):
 
     for i in range(num_model_pairs):
         if use_stratified:
-            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=i)
+            split_seed = i if random_seed is None else int(random_seed) + i
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=split_seed)
             first_half, second_half = next(sss.split(indices, labels))
         else:
-            np.random.shuffle(indices)
-            first_half = indices[:split_index]
-            second_half = indices[split_index:]
+            shuffled_indices = indices.copy()
+            if rng is None:
+                np.random.shuffle(shuffled_indices)
+            else:
+                rng.shuffle(shuffled_indices)
+            first_half = shuffled_indices[:split_index]
+            second_half = shuffled_indices[split_index:]
 
         master_keep[i * 2, second_half] = False
         master_keep[i * 2 + 1, first_half] = False
