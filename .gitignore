@@ -6,3 +6,4 @@ exp_*
 .DS_Store
 .privacy_meter_venv/
 logs
+configs/
