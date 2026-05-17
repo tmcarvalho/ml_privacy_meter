@@ -306,6 +306,7 @@ def train_nontorch_models(
         F.scaled_dot_product_attention = sdpa_ignore_gqa
 
     try:
+        _y_for_acc = y_train  # default: predictions are in original label space
         if configs["model_name"] == "tabnet":
             n_train = len(X_train)
             batch_size = min(configs.get("batch_size", 256), n_train)
@@ -327,15 +328,31 @@ def train_nontorch_models(
                 patience=configs.get("patience", 15),
                 max_epochs=configs.get("max_epochs", 200),
             )
+        elif configs["model_name"] == "tabdpt":
+            # TabDPT requires contiguous labels 0..n-1. Random splits can produce
+            # non-contiguous label sets (e.g. {0,1,2,3,4,5,6,8,9} missing class 7)
+            # when rare classes are absent from a split. Without remapping,
+            # ensemble_predict_proba builds an inv_perm of length num_distinct_classes
+            # and then indexes it with raw label values >= num_classes, causing
+            # a CUDA index-out-of-bounds assertion.
+            from sklearn.preprocessing import LabelEncoder as _LabelEncoder
+            _le = _LabelEncoder()
+            y_train_enc = _le.fit_transform(y_train.astype(int))
+            model.fit(X_train, y_train_enc)
+            model.classes_ = _le.classes_   # original labels; used by get_probs_nontorch_models
+            model._label_encoded = True     # flag so inference helpers can decode predictions
+            _y_for_acc = y_train_enc        # compare encoded predictions to encoded truth
         else:
             model.fit(X_train, y_train)
 
         #TODO: add other models here
         y_pred = model.predict(X_train)
-        train_acc = accuracy_score(y_train, y_pred)
+        train_acc = accuracy_score(_y_for_acc, y_pred)
 
         train_loss = None
         if hasattr(model, "predict_proba"): #loss requires probabilities
+            # Pass original y_train; _log_loss_with_labels uses model.classes_ to map
+            # original labels to the correct proba columns (works for TabDPT too).
             train_loss = _log_loss_with_labels(model, y_train, model.predict_proba(X_train))
 
         print(f"Train Loss: {train_loss:.4f}" if train_loss else "")
@@ -411,6 +428,9 @@ def inference_nontorch_models(
 
     # Predict
     y_pred = model.predict(X_test)
+    # Decode label-encoded predictions back to original class values (e.g. TabDPT)
+    if getattr(model, "_label_encoded", False) and hasattr(model, "classes_"):
+        y_pred = model.classes_[y_pred.astype(int)]
     accuracy = accuracy_score(y_test, y_pred)
 
     # Compute loss if probabilities are available
