@@ -30,7 +30,8 @@ def check_configs(configs: Dict[str, Any]) -> None:
         raise ValueError("The game should have at least 2 models")
 
 
-def setup_log(report_dir: str, name: str, save_file: bool) -> logging.Logger:
+def setup_log(report_dir: str, name: str, save_file: bool,
+              logger_name: str | None = None) -> logging.Logger:
     """
     Function to generate the logger for the current run.
 
@@ -42,8 +43,13 @@ def setup_log(report_dir: str, name: str, save_file: bool) -> logging.Logger:
     Returns:
         logging.Logger: Logger object for the current run.
     """
-    my_logger = logging.getLogger(name)
+    my_logger = logging.getLogger(logger_name or name)
     my_logger.setLevel(logging.INFO)
+    my_logger.propagate = False
+
+    for handler in list(my_logger.handlers):
+        my_logger.removeHandler(handler)
+        handler.close()
 
     log_format = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s")
 
@@ -54,9 +60,6 @@ def setup_log(report_dir: str, name: str, save_file: bool) -> logging.Logger:
 
     if save_file:
         filename = f"{report_dir}/log_{name}.log"
-
-        if not Path(filename).is_file():
-            open(filename, "w+").close()
 
         log_handler = logging.FileHandler(filename, mode="a")
         log_handler.setLevel(logging.INFO)
