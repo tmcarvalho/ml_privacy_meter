@@ -38,7 +38,30 @@ from trainers.train_transformers import *
 from peft import get_peft_model
 
 
-REAL_TABPFN_MODEL_PATH = "https://huggingface.co/Prior-Labs/tabpfn_2_5/resolve/main/tabpfn-v2.5-classifier-v2.5_real.ckpt"
+DEFAULT_REAL_TABPFN_MODEL_PATH = (
+    "https://huggingface.co/Prior-Labs/tabpfn_2_5/resolve/main/"
+    "tabpfn-v2.5-classifier-v2.5_real.ckpt"
+)
+
+
+def get_real_tabpfn_model_path(configs: dict | None = None) -> str:
+    """Return the Real-TabPFN checkpoint path.
+
+    Priority:
+    1. ``configs["train"]["real_tabpfn_model_path"]``
+    2. ``configs["model"]["real_tabpfn_model_path"]``
+    3. ``REAL_TABPFN_MODEL_PATH`` environment variable
+    4. default Hugging Face checkpoint URL
+    """
+    configs = configs or {}
+    train_cfg = configs.get("train", {}) or {}
+    model_cfg = configs.get("model", {}) or {}
+    return (
+        train_cfg.get("real_tabpfn_model_path")
+        or model_cfg.get("real_tabpfn_model_path")
+        or os.environ.get("REAL_TABPFN_MODEL_PATH")
+        or DEFAULT_REAL_TABPFN_MODEL_PATH
+    )
 
 
 INPUT_OUTPUT_SHAPE = {
@@ -103,7 +126,10 @@ def get_model(model_type: str, dataset_name: str, configs: dict, device: str = N
     if model_type == "tabpfn":
         return TabPFNClassifier(device=_device)
     if model_type == "real-tabpfn":
-        return TabPFNClassifier(model_path=REAL_TABPFN_MODEL_PATH, device=_device)
+        return TabPFNClassifier(
+            model_path=get_real_tabpfn_model_path(configs),
+            device=_device,
+        )
     if model_type == "tabicl":
         return TabICLClassifier(device=_device)
     if model_type == "tabdpt":
