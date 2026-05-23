@@ -103,6 +103,7 @@ def get_probs_nontorch_models(
     samples,
     labels,
     batch_size,
+    model_name: str | None = None,
     temp: float = 1.0,
 ) -> np.ndarray:
     """
@@ -121,7 +122,12 @@ def get_probs_nontorch_models(
         y_batch = labels[start:end]
 
         # get logits
-        if hasattr(model, "predict_logits"):
+        use_predict_logits = hasattr(model, "predict_logits") and (model_name or "").lower() not in {
+            "tabpfn",
+            "real-tabpfn",
+        }
+
+        if use_predict_logits:
             logits = model.predict_logits(x_batch)
             model_exposing = "predict_logits"
 
@@ -134,7 +140,17 @@ def get_probs_nontorch_models(
             model_exposing = "decision_function"
 
         elif hasattr(model, "predict_proba"):
-            probs = model.predict_proba(x_batch)
+            if (model_name or "").lower() == "tabdpt":
+                try:
+                    probs = model.predict_proba(x_batch, context_size=None)
+                except TypeError:
+                    logger.warning(
+                        "TabDPT predict_proba does not accept context_size; "
+                        "falling back to the model default."
+                    )
+                    probs = model.predict_proba(x_batch)
+            else:
+                probs = model.predict_proba(x_batch)
             logits = np.log(probs + 1e-12)  # pseudo-logits=\
             model_exposing = "predict_proba"
 
@@ -161,7 +177,10 @@ def get_probs_nontorch_models(
         true_probs[valid] = probs[row_idx, class_indices[valid]]
         softmax_list.append(true_probs.reshape(-1, 1))
 
-    logger.info("Model exposing via {}.".format(model_exposing))
+    if (model_name or "").lower() == "tabdpt" and model_exposing == "predict_proba":
+        logger.info("Model exposing via predict_proba(context_size=None).")
+    else:
+        logger.info("Model exposing via {}.".format(model_exposing))
 
     return np.concatenate(softmax_list)
 
@@ -328,7 +347,9 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
         if is_new_model:
             if is_gpu_model:
                 _move_model(model, infer_device)
-            sig = get_probs_nontorch_models(model, logger, data, targets, batch_size)
+            sig = get_probs_nontorch_models(
+                model, logger, data, targets, batch_size, model_name=model_name
+            )
             if is_gpu_model:
                 _move_model(model, "cpu")
                 torch.cuda.empty_cache()
@@ -380,7 +401,9 @@ def compute_signal_one_model(model, dataset, configs, logger, is_population=Fals
     if is_new_model:
         if is_gpu_model and hasattr(model, "to"):
             model.to(infer_device)
-        sig = get_probs_nontorch_models(model, logger, data, targets, batch_size)
+        sig = get_probs_nontorch_models(
+            model, logger, data, targets, batch_size, model_name=model_name
+        )
         if is_gpu_model and hasattr(model, "to"):
             model.to("cpu")
             import torch as _torch
