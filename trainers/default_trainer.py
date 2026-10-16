@@ -257,7 +257,7 @@ def train_nontorch_models(
     X_train, y_train = dataloader_to_numpy(train_loader)
     ensembling_models = ["rf"]
     boosting_models = ["lightgbm", "xgboost"]
-    foundation_models = ["tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"]
+    foundation_models = ["tabpfn", "real-tabpfn", "tabicl", "tabdpt", "mitra", "tabnet", "tarte"]
 
     # Optuna hyperparameter tuning (opt-in via configs["hyperparameter_tuning"])
     if configs.get("hyperparameter_tuning", False) and configs["model_name"] in (ensembling_models + boosting_models + ["tabnet"]):
@@ -371,9 +371,23 @@ def train_nontorch_models(
     return model
 
 
+def balanced_accuracy(y_true, y_pred) -> float:
+    """Mean per-class recall over the classes present in ``y_true``.
+
+    Same value as sklearn's ``balanced_accuracy_score``, without its warning when
+    a predicted class is absent from ``y_true``.
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+    if len(y_true) == 0:
+        return float("nan")
+    return float(np.mean([(y_pred[y_true == c] == c).mean() for c in np.unique(y_true)]))
+
+
 def inference(
-    model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: str
-) -> Tuple[float, float]:
+    model: torch.nn.Module, loader: torch.utils.data.DataLoader, device: str,
+    return_balanced: bool = False,
+) -> Tuple[float, ...]:
     """
     Evaluates the model on the provided data.
 
@@ -381,13 +395,15 @@ def inference(
         model (torch.nn.Module): Model to evaluate.
         loader (torch.utils.data.DataLoader): DataLoader for evaluation data.
         device (str): Device to use for computation ('cpu' or 'cuda').
+        return_balanced (bool): Also return the balanced accuracy.
 
     Returns:
-        Tuple[float, float]: Loss and accuracy on the evaluation data.
+        (loss, accuracy), or (loss, accuracy, balanced_accuracy) if ``return_balanced``.
     """
     model.eval().to(device)  # Make sure the model is on the correct device
     loss_fn = nn.CrossEntropyLoss()
     total_loss, correct_predictions = 0, 0
+    all_preds, all_targets = [], []
 
     with torch.no_grad():
         for data, target in loader:
@@ -400,10 +416,17 @@ def inference(
             total_loss += loss.item()
             pred = output.argmax(dim=1)
             correct_predictions += pred.eq(target).sum().item()
+            if return_balanced:
+                all_preds.append(pred.cpu().numpy())
+                all_targets.append(target.cpu().numpy())
 
     avg_loss = total_loss / len(loader)
     accuracy = correct_predictions / len(loader.dataset)
 
+    if return_balanced:
+        bal_acc = (balanced_accuracy(np.concatenate(all_targets), np.concatenate(all_preds))
+                   if all_targets else float("nan"))
+        return avg_loss, accuracy, bal_acc
     return avg_loss, accuracy
 
 
@@ -411,6 +434,7 @@ def inference(
 def inference_nontorch_models(
     model,
     test_loader,
+    return_balanced: bool = False,
 ):
     """
     Evaluates LightGBM and tabular foundation models using a PyTorch DataLoader.
@@ -420,7 +444,7 @@ def inference_nontorch_models(
         test_loader: torch DataLoader yielding (data, target)
 
     Returns:
-        (loss, accuracy)
+        (loss, accuracy), or (loss, accuracy, balanced_accuracy) if ``return_balanced``.
     """
 
     # Convert DataLoader to NumPy
@@ -439,6 +463,8 @@ def inference_nontorch_models(
         y_proba = model.predict_proba(X_test)
         loss = _log_loss_with_labels(model, y_test, y_proba)
 
+    if return_balanced:
+        return loss, accuracy, balanced_accuracy(y_test, y_pred)
     return loss, accuracy
 
 

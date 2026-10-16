@@ -23,6 +23,7 @@ from sklearn.ensemble import RandomForestClassifier
 from tabpfn import TabPFNClassifier
 from tabicl import TabICLClassifier
 from tabdpt import TabDPTClassifier
+from models.mitra import MitraICLClassifier
 from tarte_ai import TARTEBoostRegressor_TabPFN
 from pytorch_tabnet.tab_model import TabNetClassifier
 from trainers.default_trainer import inference_nontorch_models, train, inference, dp_train, train_nontorch_models
@@ -134,6 +135,11 @@ def get_model(model_type: str, dataset_name: str, configs: dict, device: str = N
         return TabICLClassifier(device=_device)
     if model_type == "tabdpt":
         return TabDPTClassifier(device=_device)
+    if model_type == "mitra":
+        return MitraICLClassifier(
+            device=_device,
+            max_context=configs.get("train", {}).get("mitra_max_context"),
+        )
     if model_type == "tabnet":
         train_cfg = configs.get("train", {})
         return TabNetClassifier(
@@ -505,7 +511,7 @@ def prepare_models(
     np.save(f"{log_dir}/memberships.npy", all_memberships)
 
     model_list = []
-    new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add other models here!
+    new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "mitra", "tabnet", "tarte"] #TODO: add other models here!
 
     # for split, split_info in enumerate(data_split_info):
     for split in range(len(data_split_info)):
@@ -567,6 +573,7 @@ def prepare_models(
                     hf_dataset.select(split_info["test"]),
                 )
             train_acc, test_acc = None, None
+            train_bal_acc, test_bal_acc = None, None
         elif model_name != "speedyresnet":
             train_loader = get_dataloader(
                 torch.utils.data.Subset(dataset, split_info["train"]),
@@ -591,10 +598,15 @@ def prepare_models(
                     train_config,
                     test_loader,
                 )
-                test_loss, test_acc = inference_nontorch_models(model, test_loader)
-                train_loss, train_acc = inference_nontorch_models(model, train_loader)
-                logger.info(f"Train accuracy {train_acc}, Train Loss {train_loss}")
-                logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}")
+                test_loss, test_acc, test_bal_acc = inference_nontorch_models(
+                    model, test_loader, return_balanced=True)
+                train_loss, train_acc, train_bal_acc = inference_nontorch_models(
+                    model, train_loader, return_balanced=True)
+                # Keep the "Train/Test accuracy <value>" prefix: log parsers rely on it.
+                logger.info(f"Train accuracy {train_acc}, Train Loss {train_loss}, "
+                            f"Train balanced accuracy {train_bal_acc}")
+                logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}, "
+                            f"Test balanced accuracy {test_bal_acc}")
 
             else:
                 model = train(
@@ -603,10 +615,14 @@ def prepare_models(
                     train_config,
                     test_loader,
                 )
-                test_loss, test_acc = inference(model, test_loader, device)
-                train_loss, train_acc = inference(model, train_loader, device)
-                logger.info(f"Train accuracy {train_acc}, Train Loss {train_loss}")
-                logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}")
+                test_loss, test_acc, test_bal_acc = inference(
+                    model, test_loader, device, return_balanced=True)
+                train_loss, train_acc, train_bal_acc = inference(
+                    model, train_loader, device, return_balanced=True)
+                logger.info(f"Train accuracy {train_acc}, Train Loss {train_loss}, "
+                            f"Train balanced accuracy {train_bal_acc}")
+                logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}, "
+                            f"Test balanced accuracy {test_bal_acc}")
 
         elif model_name == "speedyresnet" and dataset_name == "cifar10":
             data = load_cifar10_data(
@@ -631,6 +647,7 @@ def prepare_models(
                 eval_batchsize=eval_batch_size,
                 device=device,
             )
+            train_bal_acc, test_bal_acc = None, None  # not computed by fast_train
         else:
             raise ValueError(
                 f"The {model_name} is not supported for the {dataset_name}"
@@ -686,6 +703,8 @@ def prepare_models(
                 "model_path": f"{log_dir}/model_{model_idx}.pkl",
                 "train_acc": train_acc,
                 "test_acc": test_acc,
+                "train_bal_acc": train_bal_acc,
+                "test_bal_acc": test_bal_acc,
                 "train_loss": train_loss,
                 "test_loss": test_loss,
                 "dataset": dataset_name,
@@ -706,6 +725,8 @@ def prepare_models(
                 "model_path": f"{log_dir}/model_{model_idx}.pkl",
                 "train_acc": train_acc,
                 "test_acc": test_acc,
+                "train_bal_acc": train_bal_acc,
+                "test_bal_acc": test_bal_acc,
                 "train_loss": train_loss,
                 "test_loss": test_loss,
                 "dataset": dataset_name,
@@ -789,12 +810,16 @@ def dp_prepare_models(
                 configs["train"],
                 test_loader,
             )
-            test_loss, test_acc = inference(model, test_loader, device)
-            train_loss, train_acc = inference(model, train_loader, device)
+            test_loss, test_acc, test_bal_acc = inference(
+                model, test_loader, device, return_balanced=True)
+            train_loss, train_acc, train_bal_acc = inference(
+                model, train_loader, device, return_balanced=True)
             logger.info(
-                f"Train accuracy {train_acc}, Train Loss {train_loss} (epsilon = {epsilon}, delta = 1e-5)"
+                f"Train accuracy {train_acc}, Train Loss {train_loss} (epsilon = {epsilon}, delta = 1e-5), "
+                f"Train balanced accuracy {train_bal_acc}"
             )
-            logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}")
+            logger.info(f"Test accuracy {test_acc}, Test Loss {test_loss}, "
+                        f"Test balanced accuracy {test_bal_acc}")
         elif model_name == "speedyresnet" and dataset_name == "cifar10":
             raise ValueError(
                 f"DP training is not supported for model {model_name} and dataset {dataset_name}"
@@ -827,6 +852,8 @@ def dp_prepare_models(
             "model_path": f"{log_dir}/model_{model_idx}.pkl",
             "train_acc": train_acc,
             "test_acc": test_acc,
+            "train_bal_acc": train_bal_acc,
+            "test_bal_acc": test_bal_acc,
             "train_loss": train_loss,
             "test_loss": test_loss,
             "dataset": dataset_name,

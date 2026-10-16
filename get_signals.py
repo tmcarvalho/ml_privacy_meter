@@ -249,7 +249,7 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
     Returns:
         signals (np.array): Signal value for all samples in all models
     """
-    new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"] #TODO: add more
+    new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "mitra", "tabnet", "tarte"] #TODO: add more
     # Check if signals are available on disk
     signal_file_name = (
         f"{configs['audit']['algorithm'].lower()}_ramia_signals"
@@ -312,16 +312,16 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
             targets = targets.view(data.shape[0], -1)
 
     n_jobs = configs["audit"].get("n_jobs", 1)
-    # TabICL/TabDPT load large models into RAM per worker — cap to 1 on big datasets
+    # TabICL/TabDPT/Mitra load large models into RAM per worker — cap to 1 on big datasets
     # to avoid RAM OOM when n_jobs=-1 would spawn dozens of workers each holding a model copy.
-    if model_name in ("tabicl", "tabdpt") and len(dataset) > 10_000:
+    if model_name in ("tabicl", "tabdpt", "mitra") and len(dataset) > 10_000:
         n_jobs = 1
     is_new_model = model_name.lower() in new_models
 
     # rf/lightgbm are CPU-only sklearn models — not safe to run concurrently across models.
-    # All other supported models (tabpfn, real-tabpfn, tabicl, tabdpt, tabnet, tarte) are
+    # All other supported models (tabpfn, real-tabpfn, tabicl, tabdpt, mitra, tabnet, tarte) are
     # PyTorch/CUDA-based and release the GIL during GPU ops.
-    torch_models = {"tabdpt", "tabnet", "tarte", "tabpfn", "real-tabpfn", "tabicl"}
+    torch_models = {"tabdpt", "tabnet", "tarte", "tabpfn", "real-tabpfn", "tabicl", "mitra"}
     use_threads = model_name.lower() in torch_models
 
     # Models are moved to CPU after training to free GPU memory between training runs.
@@ -381,8 +381,8 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
 
 def compute_signal_one_model(model, dataset, configs, logger, is_population=False):
     """Compute signals for a single model without caching. Returns (n_samples, k) array."""
-    new_models = {"lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "tabnet", "tarte"}
-    gpu_models = {"tabdpt", "tabnet", "tarte", "tabpfn", "real-tabpfn", "tabicl"}
+    new_models = {"lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "mitra", "tabnet", "tarte"}
+    gpu_models = {"tabdpt", "tabnet", "tarte", "tabpfn", "real-tabpfn", "tabicl", "mitra"}
     model_name = configs["train"]["model_name"]
     is_new_model = model_name.lower() in new_models
     is_gpu_model = model_name.lower() in gpu_models
