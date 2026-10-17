@@ -213,6 +213,15 @@ def load_existing_model(
             # variant (e.g. avx512 vs avx2) that has an incompatible Python binding.
             if hasattr(model_weight, "faiss_knn"):
                 model_weight.faiss_knn = None
+            # Pickles from an older package version may lack __init__ params added
+            # since (e.g. TabDPT clip_sigma); sklearn get_params/clone then fail.
+            # Fill them with the current defaults.
+            if hasattr(model_weight, "get_params"):
+                import inspect
+                for name, param in inspect.signature(type(model_weight).__init__).parameters.items():
+                    if (param.default is not inspect.Parameter.empty
+                            and not hasattr(model_weight, name)):
+                        setattr(model_weight, name, param.default)
             # For TabPFN: the unpickled executor_ holds tensors on the device
             # they were saved with (typically CPU). estimator_to_device moves
             # both the attribute flags AND the inference engine to the new device.
