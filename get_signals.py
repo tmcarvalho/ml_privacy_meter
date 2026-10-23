@@ -358,6 +358,10 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
             return idx, get_softmax(model, data, targets, batch_size, device, pad_token_id=pad_token_id)
 
     workers = len(models_list) if n_jobs == -1 else n_jobs
+    # All GPU models share one device: running them in parallel threads puts every
+    # model on the GPU at once (12 models with --num-ref 5 -> OOM). Run them one at a time.
+    if is_gpu_model:
+        workers = 1
     if workers > 1 and is_new_model and use_threads:
         logger.info("Using %d parallel workers for signal computation.", workers)
         results = [None] * len(models_list)
