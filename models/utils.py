@@ -167,6 +167,40 @@ def get_model(model_type: str, dataset_name: str, configs: dict, device: str = N
         raise NotImplementedError(f"{model_type} is not implemented")
 
 
+def _load_pickle_on_device(file, device):
+    """Unpickle a model saved on another machine onto `device`.
+
+    Pickles made on a GPU box can hold CUDA tensors, and TabICL's __setstate__
+    moves its model to the saved `device` (e.g. cuda:0) while unpickling. Both
+    fail on a machine without CUDA, so redirect them to the requested device.
+    """
+    import io
+    import tabicl.sklearn.base as tabicl_base
+
+    target = device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        target = "cpu"
+
+    class _Unpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if module == "torch.storage" and name == "_load_from_bytes":
+                return lambda b: torch.load(io.BytesIO(b), map_location=target, weights_only=False)
+            return super().find_class(module, name)
+
+    base = tabicl_base.TabICLBaseEstimator
+    original = base._resolve_device
+
+    def _resolve_to_target(self):
+        self.device = target
+        self.device_ = torch.device(target)
+
+    base._resolve_device = _resolve_to_target
+    try:
+        return _Unpickler(file).load()
+    finally:
+        base._resolve_device = original
+
+
 def load_existing_model(
     model_metadata: dict, dataset: torchvision.datasets, device: str, config: dict
 ):
@@ -202,7 +236,7 @@ def load_existing_model(
     model_checkpoint_extension = os.path.splitext(model_path)[1]
     if model_checkpoint_extension == ".pkl":
         with open(model_path, "rb") as file:
-            model_weight = pickle.load(file)
+            model_weight = _load_pickle_on_device(file, device)
         # For PyTorch, call load_state_dict
         if hasattr(model, "load_state_dict") and isinstance(model_weight, dict):
             model.load_state_dict(model_weight)
