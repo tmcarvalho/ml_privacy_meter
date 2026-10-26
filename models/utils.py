@@ -218,7 +218,7 @@ def load_existing_model(
     dataset_name = model_metadata["dataset"]
 
     if model_name != "speedyresnet":
-        model = get_model(model_name, dataset_name, config)
+        model = get_model(model_name, dataset_name, config, device=device)
     else:
         data = load_cifar10_data(dataset, [0], [0], device=device)
         model = NetworkEMA(make_net(data, device=device))
@@ -300,7 +300,7 @@ def dp_load_existing_model(
     dataset_name = model_metadata["dataset"]
 
     if model_name != "speedyresnet":
-        model = get_model(model_name, dataset_name, config)
+        model = get_model(model_name, dataset_name, config, device=device)
     else:
         data = load_cifar10_data(dataset, [0], [0], device=device)
         model = NetworkEMA(make_net(data, device=device))
