@@ -711,6 +711,7 @@ def prepare_models(
             except Exception:
                 pass
         del model
+        gc.collect()
         torch.cuda.empty_cache()
         cpu_mem_end = process.memory_info().rss
         cpu_time_end = process.cpu_times().user
