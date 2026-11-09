@@ -84,7 +84,9 @@ class MitraICLClassifier(MitraClassifier):
 
     def _load_model(self):
         with self._on_device():
-            model = Tab2D.from_pretrained(self.hf_model, device=self._device_type)
+            # from_pretrained leaves (some) weights on the CPU; fit() hid this because
+            # TrainerFinetune moves the model, but an unpickled model is not refit.
+            model = Tab2D.from_pretrained(self.hf_model, device=self._device_type).to(self._device_type)
         for module in model.modules():
             if getattr(module, "use_flash_attn", False):
                 module.use_flash_attn = False   # exposes no attention weights to hooks
@@ -107,9 +109,15 @@ class MitraICLClassifier(MitraClassifier):
             len(self.X), size=self.context_len, replace=False)
 
     def _ensure_models(self):
+        """Weights and inputs on self.device. Mitra moves its inputs to trainer.device, so a
+        model unpickled or loaded elsewhere could otherwise sit on another device than
+        its inputs ("Expected all tensors to be on the same device")."""
         for trainer in self.trainers:
             if trainer.model is None:
                 trainer.model = self._load_model()
+            else:
+                with self._on_device():
+                    trainer.model = trainer.model.to(self._device_type)
             trainer.device = self._device_type
 
     def fit(self, X, y):
