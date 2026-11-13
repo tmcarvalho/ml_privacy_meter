@@ -8,7 +8,51 @@ import numpy as np
 import torch
 from torch import nn
 from torch.optim import lr_scheduler
-from sklearn.metrics import accuracy_score, log_loss
+from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, r2_score
+
+REGRESSION = "regression"
+
+
+def predict_regression(model, X, model_name: str | None = None) -> np.ndarray:
+    """Point predictions of a regressor, shape (n_samples,).
+
+    TabDPT's regressor subsamples a 2048-row context by default; like the
+    classification signals (``predict_proba(context_size=None)``) it is given its
+    whole training set as context so every member is attended to.
+    """
+    if (model_name or "").lower() == "tabdpt":
+        try:
+            pred = model.predict(X, context_size=None)
+        except TypeError:
+            pred = model.predict(X)
+    else:
+        pred = model.predict(X)
+    if isinstance(pred, torch.Tensor):
+        pred = pred.detach().cpu().numpy()
+    return np.asarray(pred, dtype=np.float64).reshape(-1)
+
+
+def regression_metrics(y_true, y_pred) -> Dict[str, float]:
+    """Utility metrics of real-valued predictions.
+
+    mse, rmse, nrmse = rmse / (max(y_true) - min(y_true)) (range-normalised, so it is
+    comparable across datasets with different target units), and r2.
+    """
+    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    mse = float(mean_squared_error(y_true, y_pred))
+    rmse = float(np.sqrt(mse))
+    y_range = float(np.ptp(y_true)) if len(y_true) else 0.0
+    return {
+        "mse": mse,
+        "rmse": rmse,
+        "nrmse": rmse / y_range if y_range > 0 else float("nan"),
+        "r2": float(r2_score(y_true, y_pred)) if len(y_true) > 1 else float("nan"),
+    }
+
+
+def format_regression_metrics(metrics: Dict[str, float]) -> str:
+    return " | ".join(f"{k.upper()}: {metrics[k]:.4f}" for k in ("mse", "rmse", "nrmse", "r2"))
 
 
 def _log_loss_with_labels(model, y_true, y_proba):
@@ -306,6 +350,18 @@ def train_nontorch_models(
         F.scaled_dot_product_attention = sdpa_ignore_gqa
 
     try:
+        if configs.get("task") == REGRESSION:
+            # Real-valued targets: no label encoding, no class probabilities.
+            model.fit(X_train, y_train.astype(np.float32))
+            train_metrics = regression_metrics(
+                y_train, predict_regression(model, X_train, configs["model_name"]))
+            print(f"Train {format_regression_metrics(train_metrics)}")
+            if test_loader:
+                _, test_metrics = inference_nontorch_models(
+                    model, test_loader, task=REGRESSION, model_name=configs["model_name"])
+                print(f"Test  {format_regression_metrics(test_metrics)}")
+            return model
+
         _y_for_acc = y_train  # default: predictions are in original label space
         if configs["model_name"] == "tabnet":
             n_train = len(X_train)
@@ -435,6 +491,8 @@ def inference_nontorch_models(
     model,
     test_loader,
     return_balanced: bool = False,
+    task: str = "classification",
+    model_name: str | None = None,
 ):
     """
     Evaluates LightGBM and tabular foundation models using a PyTorch DataLoader.
@@ -442,13 +500,21 @@ def inference_nontorch_models(
     Args:
         model: Trained model
         test_loader: torch DataLoader yielding (data, target)
+        task: "classification" or "regression".
+        model_name: Model name; selects model-specific prediction options for regression.
 
     Returns:
-        (loss, accuracy), or (loss, accuracy, balanced_accuracy) if ``return_balanced``.
+        Classification: (loss, accuracy), or (loss, accuracy, balanced_accuracy) if ``return_balanced``.
+        Regression: (mse, metrics) with metrics = {"mse", "rmse", "nrmse", "r2"}
+            (see ``regression_metrics``), or (mse, metrics, None) if ``return_balanced``.
     """
 
     # Convert DataLoader to NumPy
     X_test, y_test = dataloader_to_numpy(test_loader)
+
+    if task == REGRESSION:
+        metrics = regression_metrics(y_test, predict_regression(model, X_test, model_name))
+        return (metrics["mse"], metrics, None) if return_balanced else (metrics["mse"], metrics)
 
     # Predict
     y_pred = model.predict(X_test)

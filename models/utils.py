@@ -18,14 +18,15 @@ from transformers import AutoModelForCausalLM
 
 from dataset.utils import get_dataloader
 from models import AlexNet, CNN, MLP, WideResNet
-from lightgbm import LGBMClassifier
-from sklearn.ensemble import RandomForestClassifier
-from tabpfn import TabPFNClassifier
-from tabicl import TabICLClassifier
-from tabdpt import TabDPTClassifier
-from models.mitra import MitraICLClassifier
+from lightgbm import LGBMClassifier, LGBMRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from tabpfn import TabPFNClassifier, TabPFNRegressor
+from tabicl import TabICLClassifier, TabICLRegressor
+from tabdpt import TabDPTClassifier, TabDPTRegressor
+from models.mitra import MitraICLClassifier, MitraICLRegressor
 from tarte_ai import TARTEBoostRegressor_TabPFN
 from pytorch_tabnet.tab_model import TabNetClassifier
+from dataset import get_task, REGRESSION
 from trainers.default_trainer import inference_nontorch_models, train, inference, dp_train, train_nontorch_models
 from trainers.fast_train import (
     load_cifar10_data,
@@ -43,29 +44,48 @@ DEFAULT_REAL_TABPFN_MODEL_PATH = (
     "https://huggingface.co/Prior-Labs/tabpfn_2_5/resolve/main/"
     "tabpfn-v2.5-classifier-v2.5_real.ckpt"
 )
+DEFAULT_REAL_TABPFN_REGRESSOR_MODEL_PATH = (
+    "https://huggingface.co/Prior-Labs/tabpfn_2_5/resolve/main/"
+    "tabpfn-v2.5-regressor-v2.5_real.ckpt"
+)
 
 
-def get_real_tabpfn_model_path(configs: dict | None = None) -> str:
-    """Return the Real-TabPFN checkpoint path.
+def get_real_tabpfn_model_path(configs: dict | None = None, task: str | None = None) -> str:
+    """Return the Real-TabPFN checkpoint path for the run's task.
 
-    Priority:
-    1. ``configs["train"]["real_tabpfn_model_path"]``
-    2. ``configs["model"]["real_tabpfn_model_path"]``
-    3. ``REAL_TABPFN_MODEL_PATH`` environment variable
+    Priority (``<key>`` is ``real_tabpfn_model_path`` for classification and
+    ``real_tabpfn_regressor_model_path`` for regression):
+    1. ``configs["train"][<key>]``
+    2. ``configs["model"][<key>]``
+    3. ``REAL_TABPFN_MODEL_PATH`` / ``REAL_TABPFN_REGRESSOR_MODEL_PATH`` environment variable
     4. default Hugging Face checkpoint URL
     """
     configs = configs or {}
+    task = task or get_task(configs)
     train_cfg = configs.get("train", {}) or {}
     model_cfg = configs.get("model", {}) or {}
-    return (
-        train_cfg.get("real_tabpfn_model_path")
-        or model_cfg.get("real_tabpfn_model_path")
-        or os.environ.get("REAL_TABPFN_MODEL_PATH")
-        or DEFAULT_REAL_TABPFN_MODEL_PATH
-    )
+    if task == REGRESSION:
+        key, env, default = (
+            "real_tabpfn_regressor_model_path",
+            "REAL_TABPFN_REGRESSOR_MODEL_PATH",
+            DEFAULT_REAL_TABPFN_REGRESSOR_MODEL_PATH,
+        )
+    else:
+        key, env, default = (
+            "real_tabpfn_model_path",
+            "REAL_TABPFN_MODEL_PATH",
+            DEFAULT_REAL_TABPFN_MODEL_PATH,
+        )
+    return train_cfg.get(key) or model_cfg.get(key) or os.environ.get(env) or default
+
+
+# Models that can be trained on a regression dataset (configs["data"]["task"] == "regression").
+REGRESSION_MODELS = {"lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "mitra"}
 
 
 INPUT_OUTPUT_SHAPE = {
+    "46921_diabetes": [8, 2],
+    "diabetes": [10, 1],
     "46908_APSFailure": [169, 2],
     "us_stocks_financial": [229, 2],
     "strikes": [6, 3],
@@ -113,6 +133,9 @@ def get_model(model_type: str, dataset_name: str, configs: dict, device: str = N
             return get_peft_model(
                 AutoModelForCausalLM.from_pretrained(model_type), peft_config
             )
+
+    if get_task(configs) == REGRESSION:
+        return get_regression_model(model_type, configs, device=device)
 
     num_classes = INPUT_OUTPUT_SHAPE[dataset_name][1]
     in_shape = INPUT_OUTPUT_SHAPE[dataset_name][0]
@@ -165,6 +188,41 @@ def get_model(model_type: str, dataset_name: str, configs: dict, device: str = N
         return torchvision.models.vgg16(pretrained=False)
     else:
         raise NotImplementedError(f"{model_type} is not implemented")
+
+
+def _resolve_device(configs: dict, device: str = None) -> str:
+    raw = device or configs.get("train", {}).get("device", "cuda:0")
+    return f"cuda:{raw}" if isinstance(raw, int) else raw
+
+
+def get_regression_model(model_type: str, configs: dict, device: str = None):
+    """Regressor counterpart of ``get_model`` for datasets with a real-valued target."""
+    if model_type not in REGRESSION_MODELS:
+        raise NotImplementedError(
+            f"{model_type} does not support regression yet. "
+            f"Supported regression models: {sorted(REGRESSION_MODELS)}"
+        )
+    if model_type == "lightgbm":
+        return LGBMRegressor()
+    if model_type == "rf":
+        return RandomForestRegressor()
+    _device = _resolve_device(configs, device)
+    if model_type == "tabpfn":
+        return TabPFNRegressor(device=_device)
+    if model_type == "real-tabpfn":
+        return TabPFNRegressor(
+            model_path=get_real_tabpfn_model_path(configs, task=REGRESSION),
+            device=_device,
+        )
+    if model_type == "tabicl":
+        return TabICLRegressor(device=_device)
+    if model_type == "tabdpt":
+        return TabDPTRegressor(device=_device)
+    if model_type == "mitra":
+        return MitraICLRegressor(
+            device=_device,
+            max_context=configs.get("train", {}).get("mitra_max_context"),
+        )
 
 
 def _load_pickle_on_device(file, device):
@@ -491,6 +549,11 @@ def split_dataset_for_training(dataset_size, num_model_pairs, labels=None, rando
     master_keep = np.full((2 * num_model_pairs, dataset_size), True, dtype=bool)
 
     # Stratification requires every class to have at least 2 members.
+    # Real-valued (regression) targets cannot be stratified: fall back to random halves.
+    if labels is not None:
+        _labels = np.asarray(labels)
+        if _labels.size == 0 or np.any(_labels < 0) or not np.allclose(_labels, np.round(_labels)):
+            labels = None
     min_class_count = np.min(np.bincount(np.asarray(labels).astype(int))) if labels is not None else 0
     use_stratified = labels is not None and len(np.unique(labels)) > 1 and min_class_count >= 2
 
@@ -594,6 +657,8 @@ def prepare_models(
             configs["train"].get("batch_size", 256),
             configs["train"].get("device", "cpu")
         )
+        task = get_task(configs)
+        train_reg = test_reg = {}
 
         if model_name == "gpt2":
             hf_dataset = dataset.hf_dataset
@@ -632,9 +697,27 @@ def prepare_models(
                 **configs["train"],
                 "log_dir": configs["run"]["log_dir"],
                 "dataset_name": dataset_name,
+                "task": task,
             }
 
-            if model_name in new_models:
+            if task == REGRESSION:
+                # get_model raises for models without a regression variant (e.g. mlp).
+                model = train_nontorch_models(
+                    get_model(model_name, dataset_name, configs),
+                    train_loader,
+                    train_config,
+                    test_loader,
+                )
+                test_loss, test_reg = inference_nontorch_models(
+                    model, test_loader, task=REGRESSION, model_name=model_name)
+                train_loss, train_reg = inference_nontorch_models(
+                    model, train_loader, task=REGRESSION, model_name=model_name)
+                train_acc = test_acc = train_bal_acc = test_bal_acc = None
+                for _split, _m in (("Train", train_reg), ("Test", test_reg)):
+                    logger.info(f"{_split} MSE {_m['mse']}, {_split} RMSE {_m['rmse']}, "
+                                f"{_split} NRMSE {_m['nrmse']}, {_split} R2 {_m['r2']}")
+
+            elif model_name in new_models:
                 model = train_nontorch_models(
                     get_model(model_name, dataset_name, configs),
                     train_loader,
@@ -752,8 +835,15 @@ def prepare_models(
                 "train_loss": train_loss,
                 "test_loss": test_loss,
                 "dataset": dataset_name,
+                "task": task,
                 **train_config_metadata,
             }
+            if task == REGRESSION:
+                # train/test_loss hold the MSE; accuracy fields stay None.
+                model_metadata_dict[model_idx].update(
+                    {f"{split}_{k}": v
+                     for split, metrics in (("train", train_reg), ("test", test_reg))
+                     for k, v in metrics.items()})
         else:
             with open(f"{log_dir}/model_{model_idx}.pkl", "wb") as f:
                 pickle.dump(model_copy.state_dict(), f)

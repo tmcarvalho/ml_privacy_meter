@@ -4,10 +4,17 @@ import json
 import os
 import numpy as np
 import optuna
-from sklearn.metrics import accuracy_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, r2_score
+from sklearn.model_selection import KFold, StratifiedKFold
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+def _task_tools(task, seed, cv):
+    """(CV splitter, score function, score name) for the task; higher score is better."""
+    if task == "regression":
+        return KFold(n_splits=cv, shuffle=True, random_state=seed), r2_score, "R2"
+    return StratifiedKFold(n_splits=cv, shuffle=True, random_state=seed), accuracy_score, "acc"
 
 
 def _best_params_path(configs):
@@ -56,12 +63,14 @@ def tune_nontorch(X_train, y_train, model_name, configs):
     cv = configs.get("tuning_cv", 3)
     seed = configs.get("random_state", 42)
 
-    print(f"\n[Optuna] Tuning {model_name} | {n_trials} trials | {cv}-fold CV")
+    task = configs.get("task", "classification")
+
+    print(f"\n[Optuna] Tuning {model_name} ({task}) | {n_trials} trials | {cv}-fold CV")
 
     if model_name == "rf":
-        best = _tune_rf(X_train, y_train, n_trials, cv, seed)
+        best = _tune_rf(X_train, y_train, n_trials, cv, seed, task)
     elif model_name == "lightgbm":
-        best = _tune_lightgbm(X_train, y_train, n_trials, cv, seed)
+        best = _tune_lightgbm(X_train, y_train, n_trials, cv, seed, task)
     elif model_name == "tabnet":
         best = _tune_tabnet(X_train, y_train, configs, n_trials, cv, seed)
     else:
@@ -72,8 +81,10 @@ def tune_nontorch(X_train, y_train, model_name, configs):
     return best
 
 
-def _tune_rf(X_train, y_train, n_trials, cv, seed):
-    from sklearn.ensemble import RandomForestClassifier
+def _tune_rf(X_train, y_train, n_trials, cv, seed, task="classification"):
+    from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
+    Model = RandomForestRegressor if task == "regression" else RandomForestClassifier
 
     n_samples, n_features = X_train.shape
 
@@ -91,7 +102,7 @@ def _tune_rf(X_train, y_train, n_trials, cv, seed):
     max_features_low = max(0.05, round(np.log2(n_features + 1) / n_features, 3))
     max_features_high = min(1.0, max(0.5, round(np.sqrt(n_features) / n_features * 2, 3)))
 
-    kf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=seed)
+    kf, score_fn, score_name = _task_tools(task, seed, cv)
 
     def objective(trial):
         params = {
@@ -104,9 +115,9 @@ def _tune_rf(X_train, y_train, n_trials, cv, seed):
             "n_jobs": -1,
         }
         scores = [
-            accuracy_score(
+            score_fn(
                 y_train[val_idx],
-                RandomForestClassifier(**params).fit(X_train[train_idx], y_train[train_idx]).predict(X_train[val_idx])
+                Model(**params).fit(X_train[train_idx], y_train[train_idx]).predict(X_train[val_idx])
             )
             for train_idx, val_idx in kf.split(X_train, y_train)
         ]
@@ -116,13 +127,15 @@ def _tune_rf(X_train, y_train, n_trials, cv, seed):
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
     best = study.best_params
-    print(f"[Optuna] Best RF params: {best} | CV acc: {study.best_value:.4f}")
+    print(f"[Optuna] Best RF params: {best} | CV {score_name}: {study.best_value:.4f}")
     print(f"  (search space: max_depth={max_depth_choices}, max_features=[{max_features_low:.3f},{max_features_high:.3f}], min_samples_leaf=[1,{max_leaf}])")
     return best
 
 
-def _tune_lightgbm(X_train, y_train, n_trials, cv, seed):
-    from lightgbm import LGBMClassifier
+def _tune_lightgbm(X_train, y_train, n_trials, cv, seed, task="classification"):
+    from lightgbm import LGBMClassifier, LGBMRegressor
+
+    Model = LGBMRegressor if task == "regression" else LGBMClassifier
 
     n_samples, n_features = X_train.shape
 
@@ -136,7 +149,7 @@ def _tune_lightgbm(X_train, y_train, n_trials, cv, seed):
     # colsample_bytree: for low-dim data allow full feature use; high-dim benefits from subsampling.
     colsample_low = max(0.3, min(0.8, round(np.sqrt(n_features) / n_features * 3, 2)))
 
-    kf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=seed)
+    kf, score_fn, score_name = _task_tools(task, seed, cv)
 
     def objective(trial):
         params = {
@@ -154,9 +167,9 @@ def _tune_lightgbm(X_train, y_train, n_trials, cv, seed):
             "verbose": -1,
         }
         scores = [
-            accuracy_score(
+            score_fn(
                 y_train[val_idx],
-                LGBMClassifier(**params).fit(X_train[train_idx], y_train[train_idx]).predict(X_train[val_idx])
+                Model(**params).fit(X_train[train_idx], y_train[train_idx]).predict(X_train[val_idx])
             )
             for train_idx, val_idx in kf.split(X_train, y_train)
         ]
@@ -166,7 +179,7 @@ def _tune_lightgbm(X_train, y_train, n_trials, cv, seed):
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
     best = study.best_params
-    print(f"[Optuna] Best LightGBM params: {best} | CV acc: {study.best_value:.4f}")
+    print(f"[Optuna] Best LightGBM params: {best} | CV {score_name}: {study.best_value:.4f}")
     print(f"  (search space: num_leaves=[15,{max_leaves}], min_child_samples=[{min_child_low},{min_child_high}], colsample_bytree=[{colsample_low:.2f},1.0])")
     return best
 

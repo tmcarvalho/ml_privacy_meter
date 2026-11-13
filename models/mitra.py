@@ -1,4 +1,4 @@
-"""Mitra (AutoGluon's Tab2D) as a frozen in-context classifier.
+"""Mitra (AutoGluon's Tab2D) as a frozen in-context classifier or regressor.
 
 ``MitraClassifier`` fine-tunes by default, holds out 20% of the training data
 for validation and randomly subsamples contexts above 8192 rows on every
@@ -9,7 +9,8 @@ the same for Mitra: ``fit`` only fits the preprocessor and stores the context
 context row unless ``max_context`` caps it.
 
 It also gives Mitra what the pipeline expects from a model: original-valued
-``classes_``, ``predict`` in the original label space, ``to(device)``, tensor
+``classes_``, ``predict`` in the original label space (classifier) or target
+units (regressor), ``to(device)``, tensor
 inputs, indexed devices such as ``cuda:1`` and pickles without the pretrained
 weights (they never change, so they are reloaded from the Hugging Face cache).
 
@@ -32,10 +33,15 @@ from autogluon.tabular.models.mitra._internal.models.tab2d import Tab2D
 from autogluon.tabular.models.mitra.sklearn_interface import (
     DEFAULT_CLASSES,
     DEFAULT_CLS_MODEL,
+    DEFAULT_REG_MODEL,
     MitraClassifier,
+    MitraRegressor,
 )
 
 MITRA_MAX_CLASSES = DEFAULT_CLASSES  # output size of the pretrained classifier head
+
+# Pretrained Tab2D per (hf_model, device), shared by every Mitra in the process (frozen).
+_PRETRAINED: dict = {}
 
 
 def _to_numpy(X) -> np.ndarray:
@@ -46,25 +52,8 @@ def _to_numpy(X) -> np.ndarray:
     return np.asarray(X, dtype=np.float32)
 
 
-class MitraICLClassifier(MitraClassifier):
-    """Mitra prompted with its training set, without fine-tuning.
-
-    max_context: cap on the context rows attended to per prediction (a random
-        subset is drawn for every query chunk when the context is larger).
-        None uses the whole training set.
-    """
-
-    def __init__(self, device="cuda", n_estimators=1, max_context=None,
-                 hf_model=DEFAULT_CLS_MODEL, seed=0):
-        super().__init__(
-            n_estimators=n_estimators,
-            device=device,
-            fine_tune=False,
-            hf_model=hf_model,
-            seed=seed,
-            verbose=False,
-        )
-        self.max_context = max_context
+class _MitraICLMixin:
+    """Context handling shared by the frozen Mitra classifier and regressor."""
 
     # Mitra passes its device string to torch.autocast, which only accepts a
     # device *type*.  Trainers therefore get "cuda"/"cpu" and an indexed device
@@ -83,14 +72,21 @@ class MitraICLClassifier(MitraClassifier):
             yield
 
     def _load_model(self):
-        with self._on_device():
-            # from_pretrained leaves (some) weights on the CPU; fit() hid this because
-            # TrainerFinetune moves the model, but an unpickled model is not refit.
-            model = Tab2D.from_pretrained(self.hf_model, device=self._device_type).to(self._device_type)
-        for module in model.modules():
-            if getattr(module, "use_flash_attn", False):
-                module.use_flash_attn = False   # exposes no attention weights to hooks
-        return model.eval()
+        # The weights are frozen (no fine-tuning), so one copy per device is shared by
+        # every Mitra in the process: TabPATE fits a fresh Mitra per teacher, and loading
+        # from disk on every fit dominated its running time.
+        key = (self.hf_model, str(self.device))
+        model = _PRETRAINED.get(key)
+        if model is None:
+            with self._on_device():
+                # from_pretrained leaves (some) weights on the CPU; fit() hid this because
+                # TrainerFinetune moves the model, but an unpickled model is not refit.
+                model = Tab2D.from_pretrained(self.hf_model, device=self._device_type).to(self._device_type)
+            for module in model.modules():
+                if getattr(module, "use_flash_attn", False):
+                    module.use_flash_attn = False   # exposes no attention weights to hooks
+            _PRETRAINED[key] = model = model.eval()
+        return model
 
     @property
     def context_len(self) -> int:
@@ -120,36 +116,27 @@ class MitraICLClassifier(MitraClassifier):
                     trainer.model = trainer.model.to(self._device_type)
             trainer.device = self._device_type
 
-    def fit(self, X, y):
-        X = _to_numpy(X)
-        encoder = LabelEncoder()
-        y = encoder.fit_transform(np.asarray(y).reshape(-1)).astype(np.int64)
-        if len(encoder.classes_) > MITRA_MAX_CLASSES:
-            raise ValueError(
-                f"Mitra supports at most {MITRA_MAX_CLASSES} classes, got {len(encoder.classes_)}."
-            )
-        self.classes_ = encoder.classes_
-        self.X, self.y = X, y
-
-        cfg, _ = self._create_config(self.task, DEFAULT_CLASSES)
+    def _build_trainers(self, X, y, task, dim_output, n_classes):
+        """Fit Mitra's preprocessor on the context; no gradient step, no validation split."""
+        cfg, _ = self._create_config(task, dim_output)
         cfg.device = self._device_type
         cfg.hyperparams["max_samples_support"] = int(self.max_context or len(X))
         rng = np.random.RandomState(self.seed)
 
         self.trainers = []
         for _ in range(self.n_estimators):
-            trainer = TrainerFinetune(cfg, self._load_model(), n_classes=DEFAULT_CLASSES,
+            trainer = TrainerFinetune(cfg, self._load_model(), n_classes=n_classes,
                                       device=self._device_type, rng=rng, verbose=False)
             trainer.preprocessor.fit(X.copy(), y)
             trainer.post_fit_optimize()
             self.trainers.append(trainer)
-        return self
 
-    def predict_proba(self, X):
+    def _predict_chunked(self, X, predict_fn):
+        """Run ``predict_fn`` over query chunks, each seeing the context in context_order()."""
         self._ensure_models()
         X = _to_numpy(X)
         step = self.query_chunk_size
-        probs = []
+        out = []
         with self._on_device():
             for start in range(0, len(X), step):
                 # Mitra shuffles (and, above max_context, subsamples) the context with
@@ -157,11 +144,8 @@ class MitraICLClassifier(MitraClassifier):
                 # sees the context in context_order().
                 for trainer in self.trainers:
                     trainer.rng = np.random.RandomState(self.seed)
-                probs.append(super().predict_proba(X[start:start + step]))
-        return np.concatenate(probs)
-
-    def predict(self, X):
-        return self.classes_[self.predict_proba(X).argmax(axis=1)]
+                out.append(predict_fn(X[start:start + step]))
+        return np.concatenate(out)
 
     def to(self, device):
         """Move the pretrained weights; the context itself stays in host memory."""
@@ -181,3 +165,74 @@ class MitraICLClassifier(MitraClassifier):
             trainers.append(trainer)
         state["trainers"] = trainers
         return state
+
+
+class MitraICLClassifier(_MitraICLMixin, MitraClassifier):
+    """Mitra prompted with its training set, without fine-tuning.
+
+    max_context: cap on the context rows attended to per prediction (a random
+        subset is drawn for every query chunk when the context is larger).
+        None uses the whole training set.
+    """
+
+    def __init__(self, device="cuda", n_estimators=1, max_context=None,
+                 hf_model=DEFAULT_CLS_MODEL, seed=0):
+        super().__init__(
+            n_estimators=n_estimators,
+            device=device,
+            fine_tune=False,
+            hf_model=hf_model,
+            seed=seed,
+            verbose=False,
+        )
+        self.max_context = max_context
+
+    def fit(self, X, y):
+        X = _to_numpy(X)
+        encoder = LabelEncoder()
+        y = encoder.fit_transform(np.asarray(y).reshape(-1)).astype(np.int64)
+        if len(encoder.classes_) > MITRA_MAX_CLASSES:
+            raise ValueError(
+                f"Mitra supports at most {MITRA_MAX_CLASSES} classes, got {len(encoder.classes_)}."
+            )
+        self.classes_ = encoder.classes_
+        self.X, self.y = X, y
+        self._build_trainers(X, y, self.task, DEFAULT_CLASSES, n_classes=DEFAULT_CLASSES)
+        return self
+
+    def predict_proba(self, X):
+        return self._predict_chunked(X, lambda chunk: MitraClassifier.predict_proba(self, chunk))
+
+    def predict(self, X):
+        return self.classes_[self.predict_proba(X).argmax(axis=1)]
+
+
+class MitraICLRegressor(_MitraICLMixin, MitraRegressor):
+    """Mitra regressor prompted with its training set, without fine-tuning.
+
+    max_context: cap on the context rows attended to per prediction (a random
+        subset is drawn for every query chunk when the context is larger).
+        None uses the whole training set.
+    """
+
+    def __init__(self, device="cuda", n_estimators=1, max_context=None,
+                 hf_model=DEFAULT_REG_MODEL, seed=0):
+        super().__init__(
+            n_estimators=n_estimators,
+            device=device,
+            fine_tune=False,
+            hf_model=hf_model,
+            seed=seed,
+            verbose=False,
+        )
+        self.max_context = max_context
+
+    def fit(self, X, y):
+        X = _to_numpy(X)
+        y = np.asarray(y, dtype=np.float32).reshape(-1)
+        self.X, self.y = X, y
+        self._build_trainers(X, y, self.task, 1, n_classes=0)
+        return self
+
+    def predict(self, X):
+        return self._predict_chunked(X, lambda chunk: MitraRegressor.predict(self, chunk))

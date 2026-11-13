@@ -9,7 +9,9 @@ from torch.nn import functional as F
 from tqdm import tqdm
 from transformers import PreTrainedModel, AutoTokenizer
 
+from dataset import is_regression
 from dataset.utils import load_dataset_subsets
+from trainers.default_trainer import predict_regression
 
 
 def move_model_to_device(model, device):
@@ -185,6 +187,69 @@ def get_probs_nontorch_models(
     return np.concatenate(softmax_list)
 
 
+def get_target_scale(configs, targets) -> float:
+    """Scale sigma of the regression likelihood signal.
+
+    rmia.py stores the std of the training-pool targets in configs["data"]["target_scale"]
+    so every model and the population share one scale; otherwise the std of ``targets``
+    (the samples being scored) is used.
+    """
+    scale = (configs.get("data") or {}).get("target_scale")
+    if scale is None:
+        scale = float(np.std(np.asarray(targets, dtype=np.float64)))
+    scale = float(scale)
+    return scale if np.isfinite(scale) and scale > 0 else 1.0
+
+
+def get_likelihood_nontorch_regressors(
+    model,
+    logger,
+    samples,
+    targets,
+    batch_size,
+    target_scale: float,
+    model_name: str | None = None,
+) -> np.ndarray:
+    """Regression counterpart of ``get_probs_nontorch_models``.
+
+    Signal = Gaussian likelihood of the true target around the prediction,
+    exp(-0.5 * ((y - y_hat) / target_scale)^2), in (0, 1]. Like the true-class
+    probability it is 1 for a perfect prediction and decreases with the error, so
+    RMIA, LiRA (logit) and LOSS (-log p = scaled squared error) apply unchanged.
+
+    Returns:
+        np.ndarray of shape (n_samples, 1)
+    """
+    if isinstance(samples, torch.Tensor):
+        samples = samples.cpu().numpy()
+    y = np.asarray(targets.cpu().numpy() if isinstance(targets, torch.Tensor) else targets,
+                   dtype=np.float64).reshape(-1)
+    preds = np.concatenate([
+        predict_regression(model, samples[start:start + batch_size], model_name)
+        for start in range(0, len(samples), batch_size)
+    ])
+    z = (y - preds) / target_scale
+    signal = np.exp(-0.5 * z ** 2)
+    signal = np.clip(signal, 1e-12, 1.0)  # same floor as the classification signal
+    logger.info(
+        "Regression signal: Gaussian likelihood (scale=%.4g); RMSE %.4g.",
+        target_scale, float(np.sqrt(np.mean((y - preds) ** 2))),
+    )
+    return signal.reshape(-1, 1)
+
+
+def _nontorch_signal(model, logger, data, targets, batch_size, model_name, configs):
+    """Signal of one sklearn-style model: true-class probability or regression likelihood."""
+    if is_regression(configs):
+        return get_likelihood_nontorch_regressors(
+            model, logger, data, targets, batch_size,
+            target_scale=get_target_scale(configs, targets), model_name=model_name,
+        )
+    return get_probs_nontorch_models(
+        model, logger, data, targets, batch_size, model_name=model_name
+    )
+
+
 def get_loss(
     model: Union[PreTrainedModel, torch.nn.Module],
     samples: torch.Tensor,
@@ -347,9 +412,7 @@ def get_model_signals(models_list, dataset, configs, logger, is_population=False
         if is_new_model:
             if is_gpu_model:
                 _move_model(model, infer_device)
-            sig = get_probs_nontorch_models(
-                model, logger, data, targets, batch_size, model_name=model_name
-            )
+            sig = _nontorch_signal(model, logger, data, targets, batch_size, model_name, configs)
             if is_gpu_model:
                 _move_model(model, "cpu")
                 torch.cuda.empty_cache()
@@ -405,9 +468,7 @@ def compute_signal_one_model(model, dataset, configs, logger, is_population=Fals
     if is_new_model:
         if is_gpu_model and hasattr(model, "to"):
             model.to(infer_device)
-        sig = get_probs_nontorch_models(
-            model, logger, data, targets, batch_size, model_name=model_name
-        )
+        sig = _nontorch_signal(model, logger, data, targets, batch_size, model_name, configs)
         if is_gpu_model and hasattr(model, "to"):
             model.to("cpu")
             import torch as _torch
