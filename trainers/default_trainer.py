@@ -13,18 +13,27 @@ from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, r2_sco
 REGRESSION = "regression"
 
 
+TABDPT_PREDICT_SEED = 0
+
+
 def predict_regression(model, X, model_name: str | None = None) -> np.ndarray:
     """Point predictions of a regressor, shape (n_samples,).
 
     TabDPT's regressor subsamples a 2048-row context by default; like the
     classification signals (``predict_proba(context_size=None)``) it is given its
-    whole training set as context so every member is attended to.
+    whole training set as context so every member is attended to. Its ensemble is
+    random unless seeded (two calls differ), so it gets seed=0 like
+    run_attacks/brainwash.py: repeated predictions, and the target / reference /
+    defended models, then see the same ensemble.
     """
     if (model_name or "").lower() == "tabdpt":
         try:
-            pred = model.predict(X, context_size=None)
+            pred = model.predict(X, context_size=None, seed=TABDPT_PREDICT_SEED)
         except TypeError:
-            pred = model.predict(X)
+            try:
+                pred = model.predict(X, context_size=None)
+            except TypeError:
+                pred = model.predict(X)
     else:
         pred = model.predict(X)
     if isinstance(pred, torch.Tensor):
