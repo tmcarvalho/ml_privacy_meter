@@ -84,6 +84,7 @@ REGRESSION_MODELS = {"lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdp
 
 
 INPUT_OUTPUT_SHAPE = {
+    "46964_wine_quality": [12, 1],
     "46921_diabetes": [8, 2],
     "diabetes": [10, 1],
     "46908_APSFailure": [169, 2],
