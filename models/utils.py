@@ -84,6 +84,7 @@ REGRESSION_MODELS = {"lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdp
 
 
 INPUT_OUTPUT_SHAPE = {
+    "california_housing": [8, 1],
     "46964_wine_quality": [12, 1],
     "46921_diabetes": [8, 2],
     "diabetes": [10, 1],
@@ -615,7 +616,10 @@ def prepare_models(
         logger.info("Resuming: found %d already-trained models in metadata.", len(model_metadata_dict))
     else:
         model_metadata_dict = {}
-    np.save(f"{log_dir}/memberships.npy", all_memberships)
+    # temp file + rename: a write that fails on a full disk must not leave a truncated file
+    with open(f"{log_dir}/memberships.npy.tmp", "wb") as _f:
+        np.save(_f, all_memberships)
+    os.replace(f"{log_dir}/memberships.npy.tmp", f"{log_dir}/memberships.npy")
 
     model_list = []
     new_models = ["lightgbm", "rf", "tabpfn", "real-tabpfn", "tabicl", "tabdpt", "mitra", "tabnet", "tarte"] #TODO: add other models here!
@@ -904,7 +908,10 @@ def dp_prepare_models(
     Returns:
         list: List of trained model objects.
     """
-    np.save(f"{log_dir}/memberships.npy", all_memberships)
+    # temp file + rename: a write that fails on a full disk must not leave a truncated file
+    with open(f"{log_dir}/memberships.npy.tmp", "wb") as _f:
+        np.save(_f, all_memberships)
+    os.replace(f"{log_dir}/memberships.npy.tmp", f"{log_dir}/memberships.npy")
 
     model_metadata_dict = {}
     model_list = []
